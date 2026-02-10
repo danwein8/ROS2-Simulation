@@ -1,0 +1,19 @@
+resolution: 0.5
+origin: [-10.0, -10.0]
+
+shelves:
+  - {x: -6, y: -2, w: 1, h: 12}
+  - {x: -2, y: -2, w: 1, h: 12}
+  - {x:  2, y: -2, w: 1, h: 12}
+  - {x:  6, y: -2, w: 1, h: 12}
+
+tasks:
+  - {id: "A", x:  8.0, y:  8.0, dwell_s: 10}
+  - {id: "B", x: -8.0, y:  8.0, dwell_s: 6}
+  - {id: "C", x:  8.0, y: -8.0, dwell_s: 12}
+
+spawn:
+  robots: 20
+  pattern: "grid"         # grid | random_free
+  start_region: {xmin: -9, xmax: -5, ymin: -9, ymax: -5}
+  robot_spacing: 0.8
