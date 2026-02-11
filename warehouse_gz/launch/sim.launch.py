@@ -3,16 +3,14 @@ from pathlib import Path
 import yaml
 
 from launch import LaunchDescription
-from launch.actions import ExecuteProcess, OpaqueFunction
-from launch.substitutions import FindExecutable
+from launch.actions import ExecuteProcess, OpaqueFunction, IncludeLaunchDescription, TimerAction
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.substitutions import FindPackageShare
 
 def _launch(context, *args, **kwargs):
     pkg_share = Path(FindPackageShare("warehouse_gz").perform(context))
     cfg_path = pkg_share / "config" / "warehouse.yaml"
-    cfg = yaml.safe_load(cfg_path.read_text())
 
-    # 1) generate world.sdf into package share "worlds/"
     worlds_dir = pkg_share / "worlds"
     worlds_dir.mkdir(parents=True, exist_ok=True)
     world_path = worlds_dir / "warehouse_world.sdf"
@@ -24,19 +22,18 @@ def _launch(context, *args, **kwargs):
         "--out", str(world_path),
     ]
 
-    # 2) Start Gazebo Harmonic (gz sim)
     gazebo_cmd = ["gz", "sim", "-r", str(world_path)]
 
-    actions = [
+    spawn_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(str(pkg_share / "launch" / "spawn.launch.py"))
+    )
+
+    return [
         ExecuteProcess(cmd=gen_cmd, output="screen"),
         ExecuteProcess(cmd=gazebo_cmd, output="screen"),
+        # give gz sim a moment to bring up the world services
+        TimerAction(period=2.0, actions=[spawn_launch]),
     ]
-
-    # NOTE: spawning + bridging comes next; we’ll add it after build sanity check.
-    # It’s better to verify the world launches cleanly before layering complexity.
-
-    return actions
 
 def generate_launch_description():
     return LaunchDescription([OpaqueFunction(function=_launch)])
-

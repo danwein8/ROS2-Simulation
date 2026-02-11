@@ -27,7 +27,7 @@ SDF_HEADER = """<?xml version="1.0" ?>
         </collision>
         <visual name="visual">
           <geometry><plane><normal>0 0 1</normal><size>50 50</size></plane></geometry>
-          <! -- simple gray material; we can get fancier if desired -->
+          <!-- simple gray material; we can get fancier if desired -->
           <material>
             <ambient>0.7 0.7 0.7 1</ambient>
             <diffuse>0.7 0.7 0.7 1</diffuse>
@@ -53,7 +53,7 @@ def box_model(name: str, x: float, y: float, z: float, sx: float, sy: float, sz:
         </collision>
         <visual name="visual">
           <geometry><box><size>{sx} {sy} {sz}</size></box></geometry>
-          <! -- simple brown material -->
+          <!-- simple brown material -->
           <material>
             <ambient>0.6 0.3 0.1 1</ambient>
             <diffuse>0.6 0.3 0.1 1</diffuse>
@@ -72,7 +72,7 @@ def task_marker(name: str, x: float, y: float) -> str:
       <link name="link">
         <visual name="marker">
           <geometry><cylinder><radius>0.35</radius><length>0.1</length></cylinder></geometry>
-          <! -- simple red material for tasks -->
+          <!-- simple red material for tasks -->
           <material>
             <ambient>1 0 0 1</ambient>
             <diffuse>1 0 0 1</diffuse>

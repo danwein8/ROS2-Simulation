@@ -11,6 +11,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', ['launch/sim.launch.py']),
+        ('share/' + package_name + '/launch', ['launch/spawn.launch.py']),
         ('share/' + package_name + '/config', ['config/warehouse.yaml']),
         ('share/' + package_name + '/worlds', []),
         ('share/' + package_name + '/models/simple_bot', ['models/simple_bot/model.sdf']),
