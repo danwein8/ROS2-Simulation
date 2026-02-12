@@ -56,7 +56,8 @@
 <!-- macro to define complete inertial section of the robot body -->
 <xacro:macro name="inertia_body">
     <inertial>
-    <!-- displacement and orientation of the center of mass frame of the link with respect to the  -->
+    <!-- displacement and orientation of the center of mass frame of the link with respect to the coordinate plane -->
+    <!-- rpy stands for roll pitch yaw in the coordinate plane -->
     <origin rpy="0 0 0" xyz="0 0 ${s1}"/>
     <mass value"${m1}"/>
     <inertia ixx="${Ix_body}" ixy="0.0" ixz="0.0" iyy="${Iy_body}" iyz="0.0" izz="${Iz_body}"/>
@@ -66,6 +67,7 @@
 <!-- macro to define complete inertial section of the wheel -->
 <xacro:macro name="inertia_wheel">
     <inertial>
+    <!-- rotation around the x axis for the wheels represented in radians (its pi/2) -->
     <origin rpy="1.570795 0 0" xyz="0 0 0"/>
     <mass value="${m2}"/>
     <inertia ixx="${I_wheel}" ixy="0.0" ixz="0.0" iyy="${I_wheel}" iyz="0.0" izz="${Iz+wheel}"/>
@@ -82,9 +84,10 @@
 </xacro:macro>
 
 <!-- ############################################################### -->
-<!-- Addidional files (may not be needed) -->
+<!-- Addidional files (needed for control) -->
 <!-- ############################################################### -->
-<!-- <xacro:include filename="$(find mobile_robot)/model/robot.gazebo"/> -->
+<!-- inside of the warehouse_gz package, in the models/simple_bot directory thats our file -->
+<xacro:include filename="$(find warehouse_gz)/models/simple_bot/robot.gazebo"/>
 
 <!-- ############################################################### -->
 <!-- Links and joints defenitions -->
@@ -97,18 +100,20 @@
     <child link="body_link"/>
 </joint>
 
+
 <!-- body link -->
 <link name="body_link">
     <visual>
         <geometry>
-            <box size="${a} ${b} ${c}"/>
+            <box size="${a} ${c} ${b}"/>
         </geometry>
+    <!-- displacement and orientation of the geometric center of the link with respect to the parent link-->
     <origin rpy="0 0 0" xyz="0 0 ${s1}"/>
     </visual>
 
     <collision>
         <geometry>
-            <box size="${a} ${b} ${c}"/>
+            <box size="${a} ${c} ${b}"/>
         </geometry>
     <origin rpy="0 0 0" xyz="0 0 ${s1}"/>
     </collision>
