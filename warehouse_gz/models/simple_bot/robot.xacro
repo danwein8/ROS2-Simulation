@@ -47,7 +47,7 @@
 <xacro:property name="Iz_body" value="${(1/12)*m1*(a*a+c*c)}"/>
 
 <!-- moments of inertia for the wheel -->
-<xacro:property name="Iz+wheel" value="${0.5*m2*r*r}"/>
+<xacro:property name="Iz_wheel" value="${0.5*m2*r*r}"/>
 <xacro:property name="I_wheel" value="${(1.0/12.0)*m2*(3.0*r*r+d*d)}"/>
 
 <!-- moments of inertia for the caster sphere -->
@@ -59,7 +59,7 @@
     <!-- displacement and orientation of the center of mass frame of the link with respect to the coordinate plane -->
     <!-- rpy stands for roll pitch yaw in the coordinate plane -->
     <origin rpy="0 0 0" xyz="0 0 ${s1}"/>
-    <mass value"${m1}"/>
+    <mass value="${m1}"/>
     <inertia ixx="${Ix_body}" ixy="0.0" ixz="0.0" iyy="${Iy_body}" iyz="0.0" izz="${Iz_body}"/>
     </inertial>
 </xacro:macro>
@@ -70,7 +70,7 @@
     <!-- rotation around the x axis for the wheels represented in radians (its pi/2) -->
     <origin rpy="1.570795 0 0" xyz="0 0 0"/>
     <mass value="${m2}"/>
-    <inertia ixx="${I_wheel}" ixy="0.0" ixz="0.0" iyy="${I_wheel}" iyz="0.0" izz="${Iz+wheel}"/>
+    <inertia ixx="${I_wheel}" ixy="0.0" ixz="0.0" iyy="${I_wheel}" iyz="0.0" izz="${Iz_wheel}"/>
     </inertial>
 </xacro:macro>
 
