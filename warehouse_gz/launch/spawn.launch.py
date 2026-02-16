@@ -1,11 +1,14 @@
 import math
 from pathlib import Path
 import yaml
+import os
+import xacro
 
 from launch import LaunchDescription
 from launch.actions import LogInfo, OpaqueFunction, TimerAction
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
+from ament_index_python.packages import get_package_share_directory
 
 def _make_grid_poses(n, xmin, xmax, ymin, ymax, spacing):
     poses = []
@@ -33,6 +36,8 @@ def _is_pose_free(x, y, shelves, clearance):
     return True
 
 def _launch(context, *args, **kwargs):
+    pkg_name = "warehouse_gz"
+    
     pkg_share = Path(FindPackageShare("warehouse_gz").perform(context))
     cfg_path = pkg_share / "config" / "warehouse.yaml"
     cfg = yaml.safe_load(cfg_path.read_text())
@@ -67,7 +72,9 @@ def _launch(context, *args, **kwargs):
         )
 
     # Absolute path to the robot model SDF file
-    model_sdf = str(pkg_share / "models" / "simple_bot" / "model.sdf")
+    # model_sdf = str(pkg_share / "models" / "simple_bot" / "model.sdf")
+    model_xacro = str(pkg_share / "models" / "simple_bot" / "robot.xacro")
+    robot_description = xacro.process_file(model_xacro).toxml()
 
     actions = []
 
@@ -77,16 +84,35 @@ def _launch(context, *args, **kwargs):
 
         # Use ros_gz_sim's "create" node to spawn the model.
         # It calls Gazebo's /world/<name>/create service internally
-        # via native C++ gz-transport, avoiding the protobuf
-        # text-format quoting issues we hit with the gz CLI.
+        # spawn_node = Node(
+        #     package="ros_gz_sim",
+        #     executable="create",
+        #     output="screen",
+        #     parameters=[{
+        #         "world": "warehouse_world",
+        #         "file": model_sdf,
+        #         "name": name,
+        #         "topic": "robot_description",
+        #         "use_sim_time": True,
+        #         "allow_renaming": True,
+        #         "x": x,
+        #         "y": y,
+        #         "z": z,
+        #         "R": rr,
+        #         "P": pp,
+        #         "Y": yy,
+        #     }],
+        # )
+
         spawn_node = Node(
             package="ros_gz_sim",
             executable="create",
             output="screen",
             parameters=[{
                 "world": "warehouse_world",
-                "file": model_sdf,
+                "string": robot_description + name,
                 "name": name,
+                "use_sim_time": True,
                 "allow_renaming": True,
                 "x": x,
                 "y": y,
@@ -97,13 +123,43 @@ def _launch(context, *args, **kwargs):
             }],
         )
 
+        # Robot state publisher node
+        node_robot_state_publisher = Node(
+            package='robot_state_publisher',
+            executable='robot_state_publisher',
+            output='screen',
+            parameters=[{'robot_description': robot_description + name,
+                         'use_sim_time': True}]
+        )
+
         actions.append(TimerAction(
             period=0.5 * i,
             actions=[
                 LogInfo(msg=f"Spawning {name} at x={x:.3f}, y={y:.3f}, z={z:.3f}"),
                 spawn_node,
+                node_robot_state_publisher,
             ]
         ))
+
+    # this is the node that bridges the topics between ROS and Gazebo, it uses the parameters defined in the bridge_parameters.yaml file
+    bridge_params = os.path.join(
+        get_package_share_directory(pkg_name),
+        'config',
+        'bridge_parameters.yaml'
+    )
+
+    start_gazebo_ros_bridge = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        arguments=[
+            '--ros-args',
+            '-p',
+            f'config_file:={bridge_params}'
+        ],
+        output='screen'
+    )
+
+    actions.append(start_gazebo_ros_bridge)
 
     return actions
 
