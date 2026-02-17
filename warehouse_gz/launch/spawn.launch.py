@@ -92,7 +92,7 @@ def _launch(context, *args, **kwargs):
                 "string": robot_description,
                 "name": name,
                 "use_sim_time": True,
-                "allow_renaming": True,
+                "allow_renaming": False,
                 # "namespace": name,
                 # "frame_prefix": f"{name}/",
                 "x": x,
@@ -160,7 +160,19 @@ def _launch(context, *args, **kwargs):
             "clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock",],
     )
 
+    # pose_info_bridge = Node(
+    #     package="ros_gz_bridge",
+    #     executable="parameter_bridge",
+    #     name="world_pose_info_bridge",
+    #     output="screen",
+    #     arguments=[
+    #         # tf gz Pose_V -> ROS TFMessage
+    #         "world/warehouse_world/pose/info@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V",
+    #     ],
+    # )
+
     actions.append(clock_bridge_node)
+    # actions.append(pose_info_bridge)
 
     return actions
 
