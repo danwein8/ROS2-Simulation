@@ -74,35 +74,14 @@ def _launch(context, *args, **kwargs):
     # Absolute path to the robot model SDF file
     # model_sdf = str(pkg_share / "models" / "simple_bot" / "model.sdf")
     model_xacro = str(pkg_share / "models" / "simple_bot" / "robot.xacro")
-    robot_description = xacro.process_file(model_xacro).toxml()
 
     actions = []
 
     for i in range(n):
         name = f"robot_{i:02d}"
         x, y, z, rr, pp, yy = poses[i]
-
-        # Use ros_gz_sim's "create" node to spawn the model.
-        # It calls Gazebo's /world/<name>/create service internally
-        # spawn_node = Node(
-        #     package="ros_gz_sim",
-        #     executable="create",
-        #     output="screen",
-        #     parameters=[{
-        #         "world": "warehouse_world",
-        #         "file": model_sdf,
-        #         "name": name,
-        #         "topic": "robot_description",
-        #         "use_sim_time": True,
-        #         "allow_renaming": True,
-        #         "x": x,
-        #         "y": y,
-        #         "z": z,
-        #         "R": rr,
-        #         "P": pp,
-        #         "Y": yy,
-        #     }],
-        # )
+        mappings = {'robot_name': name}
+        robot_description = xacro.process_file(model_xacro, mappings=mappings).toxml()
 
         spawn_node = Node(
             package="ros_gz_sim",
@@ -110,10 +89,12 @@ def _launch(context, *args, **kwargs):
             output="screen",
             parameters=[{
                 "world": "warehouse_world",
-                "string": robot_description + name,
+                "string": robot_description,
                 "name": name,
                 "use_sim_time": True,
                 "allow_renaming": True,
+                # "namespace": name,
+                # "frame_prefix": f"{name}/",
                 "x": x,
                 "y": y,
                 "z": z,
@@ -127,39 +108,59 @@ def _launch(context, *args, **kwargs):
         node_robot_state_publisher = Node(
             package='robot_state_publisher',
             executable='robot_state_publisher',
+            namespace=name,
             output='screen',
-            parameters=[{'robot_description': robot_description + name,
-                         'use_sim_time': True}]
+            parameters=[{'robot_description': robot_description,
+                         'use_sim_time': True,
+                         'frame_prefix': f"{name}/"}]
         )
 
+    # this is the node that bridges the topics between ROS and Gazebo
+        bridge_node = Node(
+            package="ros_gz_bridge",
+            executable="parameter_bridge",
+            name=f"{name}_bridge",
+            output="screen",
+        arguments=[
+            # bracket direction between msg types indicates direction of bridge
+            # ros to gz ], gz to ros [
+            # cmd_vel ROS Twist -> gz Twist
+            f"/model/{name}/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist",
+            # odom gz Odometry -> ROS Odometry
+            f"/model/{name}/odom@nav_msgs/msg/Odometry[gz.msgs.Odometry",
+            # joint_states gz Model -> ROS JointState
+            f"/model/{name}/joint_states@sensor_msgs/msg/JointState[gz.msgs.Model",
+            # tf gz Pose_V -> ROS TFMessage
+            f"/model/{name}/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V",
+        ],
+        remappings=[
+            (f'/model/{name}/cmd_vel', f'/{name}/cmd_vel'),
+            (f'/model/{name}/odom', f'/{name}/odom'),
+            (f'/model/{name}/joint_states', f'/{name}/joint_states'),
+            (f'/model/{name}/tf', f'/tf'),
+        ],
+    )
+        
         actions.append(TimerAction(
             period=0.5 * i,
             actions=[
                 LogInfo(msg=f"Spawning {name} at x={x:.3f}, y={y:.3f}, z={z:.3f}"),
                 spawn_node,
                 node_robot_state_publisher,
+                bridge_node,
             ]
         ))
-
-    # this is the node that bridges the topics between ROS and Gazebo, it uses the parameters defined in the bridge_parameters.yaml file
-    bridge_params = os.path.join(
-        get_package_share_directory(pkg_name),
-        'config',
-        'bridge_parameters.yaml'
-    )
-
-    start_gazebo_ros_bridge = Node(
-        package='ros_gz_bridge',
-        executable='parameter_bridge',
+    
+    clock_bridge_node = Node(
+        package="ros_gz_bridge",
+        executable="parameter_bridge",
+        name="clock_bridge",
+        output="screen",
         arguments=[
-            '--ros-args',
-            '-p',
-            f'config_file:={bridge_params}'
-        ],
-        output='screen'
+            "clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock",],
     )
 
-    actions.append(start_gazebo_ros_bridge)
+    actions.append(clock_bridge_node)
 
     return actions
 

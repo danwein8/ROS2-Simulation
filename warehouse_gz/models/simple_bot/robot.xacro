@@ -21,6 +21,12 @@
 <xacro:property name="s3" value="${2*r}"/>
 <xacro:property name="s4" value="${c/2+d/2}"/>
 
+<!-- ############################################################### -->
+<!-- Define a robot namespace for multiple robots -->
+<!-- ############################################################### -->
+<xacro:arg name="robot_name" default="simple_bot"/>
+<xacro:property name="namespace" value="$(arg robot_name)"/>
+
 <!-- ############################################################ -->
 <!-- Mass and inertia -->
 <!-- ############################################################ -->

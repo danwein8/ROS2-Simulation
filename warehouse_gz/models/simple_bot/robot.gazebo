@@ -45,10 +45,10 @@
 
         <!-- topic, frames, and odom -->
             <topic>                   cmd_vel         </topic>
-            <tf_topic>                /tf             </tf_topic>
+            <tf_topic>                tf             </tf_topic>
             <odom_topic>              odom            </odom_topic>
-            <frame_id>                odom            </frame_id>
-            <child_frame_id>          base_footprint  </child_frame_id>
+            <frame_id>                ${namespace}/odom            </frame_id>
+            <child_frame_id>          ${namespace}/base_footprint  </child_frame_id>
             <odom_publisher_frequency>30              </odom_publisher_frequency>
 
 
