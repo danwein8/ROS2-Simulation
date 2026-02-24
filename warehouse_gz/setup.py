@@ -1,3 +1,5 @@
+from glob import glob
+
 from setuptools import find_packages, setup
 
 package_name = 'warehouse_gz'
@@ -15,11 +17,15 @@ setup(
         ('share/' + package_name + '/launch', ['launch/gazebo_model.launch.py']),
         ('share/' + package_name + '/config', ['config/warehouse.yaml']),
         ('share/' + package_name + '/config', ['config/bridge_parameters.yaml']),
+        ('share/' + package_name + '/maps', glob('maps/*.map')),
         ('share/' + package_name + '/models/simple_bot', ['models/simple_bot/robot.xacro']),
         ('share/' + package_name + '/models/simple_bot', ['models/simple_bot/robot.gazebo']),
         ('share/' + package_name + '/worlds', []),
         ('share/' + package_name + '/models/simple_bot', ['models/simple_bot/model.sdf']),
-        ('share/' + package_name + '/warehouse_gz', ['warehouse_gz/gen_world.py'])
+        (
+            'share/' + package_name + '/warehouse_gz',
+            ['warehouse_gz/gen_world.py', 'warehouse_gz/map_utils.py'],
+        ),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

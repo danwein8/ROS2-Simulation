@@ -1,7 +1,16 @@
-import math
-import os
+import argparse
 from pathlib import Path
+
 import yaml
+
+try:
+    from warehouse_gz.map_utils import (
+        grid_cell_to_world_center,
+        load_blocked_cells,
+        parse_octile_map,
+    )
+except ImportError:
+    from map_utils import grid_cell_to_world_center, load_blocked_cells, parse_octile_map
 
 SDF_HEADER = """<?xml version="1.0" ?>
 <sdf version="1.8">
@@ -83,26 +92,59 @@ def task_marker(name: str, x: float, y: float) -> str:
 """
 
 def main():
-    import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--yaml", required=True)
+    ap.add_argument("--map", required=True)
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
-    cfg = yaml.safe_load(open(args.yaml, "r"))
+    with open(args.yaml, "r", encoding="utf-8") as cfg_stream:
+        cfg = yaml.safe_load(cfg_stream)
+    if cfg is None:
+        cfg = {}
+
+    resolution = float(cfg["resolution"])
+    if resolution <= 0.0:
+        raise ValueError(f"resolution must be > 0 in {args.yaml}, got {resolution}")
+
+    origin = cfg.get("origin")
+    if not isinstance(origin, (list, tuple)) or len(origin) != 2:
+        raise ValueError(
+            f"origin must be a two-element list in {args.yaml}, got {origin!r}"
+        )
+    origin_xy = (float(origin[0]), float(origin[1]))
+
+    obstacle_height = float(cfg.get("map_obstacle_height", 1.5))
+    if obstacle_height <= 0.0:
+        raise ValueError(
+            f"map_obstacle_height must be > 0 in {args.yaml}, got {obstacle_height}"
+        )
+
+    map_path = Path(args.map)
+    _map_width, map_height, _rows = parse_octile_map(map_path)
+    blocked_cells = sorted(load_blocked_cells(map_path))
 
     parts = [SDF_HEADER]
 
-    # shelves: each shelf is a rectangle, we model as a box
-    for i, sh in enumerate(cfg.get("shelves", []), start=1):
-        x = float(sh["x"])
-        y = float(sh["y"])
-        w = float(sh["w"])
-        h = float(sh["h"])
-        # height of shelf obstacle in sim
-        z = 0.75
-        sz = 1.5
-        parts.append(box_model(f"shelf_{i}", x, y, z, w, h, sz))
+    for index, (row, col) in enumerate(blocked_cells, start=1):
+        x, y = grid_cell_to_world_center(
+            row=row,
+            col=col,
+            origin_xy=origin_xy,
+            resolution=resolution,
+            map_height=map_height,
+        )
+        parts.append(
+            box_model(
+                name=f"map_obs_{index}",
+                x=x,
+                y=y,
+                z=0.5 * obstacle_height,
+                sx=resolution,
+                sy=resolution,
+                sz=obstacle_height,
+            )
+        )
 
     # tasks as markers
     for t in cfg.get("tasks", []):
@@ -114,7 +156,10 @@ def main():
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("".join(parts))
-    print(f"Wrote world: {out_path}")
+    print(
+        f"Wrote world: {out_path} "
+        f"(map={map_path}, blocked_cells={len(blocked_cells)})"
+    )
 
 if __name__ == "__main__":
     main()
