@@ -1,5 +1,6 @@
 import argparse
 from pathlib import Path
+from typing import List, Set, Tuple
 
 import yaml
 
@@ -11,6 +12,54 @@ try:
     )
 except ImportError:
     from map_utils import grid_cell_to_world_center, load_blocked_cells, parse_octile_map
+
+
+def merge_blocked_cells(
+    blocked_cells: Set[Tuple[int, int]], map_height: int, map_width: int
+) -> List[Tuple[int, int, int, int]]:
+    """Merge blocked cells into maximal rectangles to reduce Gazebo model count.
+
+    Returns a list of (row_start, col_start, row_end, col_end) inclusive rectangles.
+    """
+    grid = [[False] * map_width for _ in range(map_height)]
+    for r, c in blocked_cells:
+        grid[r][c] = True
+
+    visited = [[False] * map_width for _ in range(map_height)]
+    rectangles: List[Tuple[int, int, int, int]] = []
+
+    for row in range(map_height):
+        col = 0
+        while col < map_width:
+            if grid[row][col] and not visited[row][col]:
+                # find the end of this horizontal run
+                col_end = col
+                while col_end + 1 < map_width and grid[row][col_end + 1] and not visited[row][col_end + 1]:
+                    col_end += 1
+
+                # extend downward while the full column range is blocked and unvisited
+                row_end = row
+                while row_end + 1 < map_height:
+                    can_extend = True
+                    for c in range(col, col_end + 1):
+                        if not grid[row_end + 1][c] or visited[row_end + 1][c]:
+                            can_extend = False
+                            break
+                    if not can_extend:
+                        break
+                    row_end += 1
+
+                # mark all cells in this rectangle as visited
+                for r in range(row, row_end + 1):
+                    for c in range(col, col_end + 1):
+                        visited[r][c] = True
+
+                rectangles.append((row, col, row_end, col_end))
+                col = col_end + 1
+            else:
+                col += 1
+
+    return rectangles
 
 SDF_HEADER = """<?xml version="1.0" ?>
 <sdf version="1.8">
@@ -121,27 +170,30 @@ def main():
         )
 
     map_path = Path(args.map)
-    _map_width, map_height, _rows = parse_octile_map(map_path)
-    blocked_cells = sorted(load_blocked_cells(map_path))
+    map_width, map_height, _rows = parse_octile_map(map_path)
+    blocked_cells = load_blocked_cells(map_path)
+    rectangles = merge_blocked_cells(blocked_cells, map_height, map_width)
 
     parts = [SDF_HEADER]
 
-    for index, (row, col) in enumerate(blocked_cells, start=1):
-        x, y = grid_cell_to_world_center(
-            row=row,
-            col=col,
-            origin_xy=origin_xy,
-            resolution=resolution,
-            map_height=map_height,
-        )
+    for index, (row_start, col_start, row_end, col_end) in enumerate(rectangles, start=1):
+        # compute center of the merged rectangle
+        mid_row = (row_start + row_end) / 2.0
+        mid_col = (col_start + col_end) / 2.0
+        origin_x, origin_y = origin_xy
+        cx = origin_x + (mid_col + 0.5) * resolution
+        cy = origin_y + (map_height - mid_row - 0.5) * resolution
+
+        n_cols = col_end - col_start + 1
+        n_rows = row_end - row_start + 1
         parts.append(
             box_model(
                 name=f"map_obs_{index}",
-                x=x,
-                y=y,
+                x=cx,
+                y=cy,
                 z=0.5 * obstacle_height,
-                sx=resolution,
-                sy=resolution,
+                sx=n_cols * resolution,
+                sy=n_rows * resolution,
                 sz=obstacle_height,
             )
         )
@@ -158,7 +210,8 @@ def main():
     out_path.write_text("".join(parts))
     print(
         f"Wrote world: {out_path} "
-        f"(map={map_path}, blocked_cells={len(blocked_cells)})"
+        f"(map={map_path}, blocked_cells={len(blocked_cells)}, "
+        f"merged_models={len(rectangles)})"
     )
 
 if __name__ == "__main__":

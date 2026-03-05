@@ -8,8 +8,10 @@ from launch.actions import (
     ExecuteProcess,
     IncludeLaunchDescription,
     OpaqueFunction,
+    RegisterEventHandler,
     TimerAction,
 )
+from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.substitutions import FindPackageShare
@@ -58,10 +60,23 @@ def _launch(context, *args, **kwargs):
         launch_arguments={"map_file": map_file}.items(),
     )
 
+    gen_process = ExecuteProcess(cmd=gen_cmd, output="screen")
+    gz_process = ExecuteProcess(cmd=gazebo_cmd, output="screen")
+
     return [
-        ExecuteProcess(cmd=gen_cmd, output="screen"),
-        ExecuteProcess(cmd=gazebo_cmd, output="screen"),
-        TimerAction(period=2.0, actions=[spawn_launch]),
+        gen_process,
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=gen_process,
+                on_exit=[gz_process],
+            )
+        ),
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=gen_process,
+                on_exit=[TimerAction(period=5.0, actions=[spawn_launch])],
+            )
+        ),
     ]
 
 
