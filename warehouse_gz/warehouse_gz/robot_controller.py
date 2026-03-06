@@ -1,0 +1,140 @@
+"""Fleet controller node: drives multiple robots to waypoint goals."""
+
+import math
+from dataclasses import dataclass, field
+from typing import Optional
+
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import PoseStamped, Twist
+from nav_msgs.msg import Odometry
+from std_msgs.msg import Bool
+
+
+@dataclass
+class RobotState:
+    x: float = 0.0
+    y: float = 0.0
+    yaw: float = 0.0
+    goal_x: Optional[float] = None
+    goal_y: Optional[float] = None
+    goal_active: bool = False
+    goal_reached: bool = False
+
+
+def _yaw_from_quat(q) -> float:
+    siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+    cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+    return math.atan2(siny_cosp, cosy_cosp)
+
+
+def _normalize_angle(a: float) -> float:
+    return math.atan2(math.sin(a), math.cos(a))
+
+
+class FleetController(Node):
+    def __init__(self):
+        super().__init__("fleet_controller")
+
+        self.declare_parameter("robot_count", 3)
+        self.declare_parameter("linear_speed", 0.5)
+        self.declare_parameter("angular_speed", 1.0)
+        self.declare_parameter("goal_tolerance", 0.15)
+        self.declare_parameter("heading_tolerance", 0.1)
+
+        robot_count = self.get_parameter("robot_count").value
+        self._linear_speed = self.get_parameter("linear_speed").value
+        self._angular_speed = self.get_parameter("angular_speed").value
+        self._goal_tolerance = self.get_parameter("goal_tolerance").value
+        self._heading_tolerance = self.get_parameter("heading_tolerance").value
+
+        self._robots: dict[str, RobotState] = {}
+        self._cmd_pubs: dict[str, rclpy.publisher.Publisher] = {}
+        self._status_pubs: dict[str, rclpy.publisher.Publisher] = {}
+
+        for i in range(robot_count):
+            name = f"robot_{i:02d}"
+            self._robots[name] = RobotState()
+
+            self.create_subscription(
+                Odometry,
+                f"/{name}/odom",
+                lambda msg, n=name: self._odom_cb(n, msg),
+                10,
+            )
+            self.create_subscription(
+                PoseStamped,
+                f"/{name}/goal_pose",
+                lambda msg, n=name: self._goal_cb(n, msg),
+                10,
+            )
+            self._cmd_pubs[name] = self.create_publisher(Twist, f"/{name}/cmd_vel", 10)
+            self._status_pubs[name] = self.create_publisher(Bool, f"/{name}/goal_status", 10)
+
+        self.create_timer(0.05, self._control_loop)  # 20 Hz
+        self.get_logger().info(
+            f"Fleet controller started for {robot_count} robots"
+        )
+
+    def _odom_cb(self, name: str, msg: Odometry):
+        state = self._robots[name]
+        state.x = msg.pose.pose.position.x
+        state.y = msg.pose.pose.position.y
+        state.yaw = _yaw_from_quat(msg.pose.pose.orientation)
+
+    def _goal_cb(self, name: str, msg: PoseStamped):
+        state = self._robots[name]
+        state.goal_x = msg.pose.position.x
+        state.goal_y = msg.pose.position.y
+        state.goal_active = True
+        state.goal_reached = False
+        self._status_pubs[name].publish(Bool(data=False))
+        self.get_logger().info(
+            f"{name}: new goal ({state.goal_x:.2f}, {state.goal_y:.2f})"
+        )
+
+    def _control_loop(self):
+        for name, state in self._robots.items():
+            if not state.goal_active or state.goal_reached:
+                continue
+
+            dx = state.goal_x - state.x
+            dy = state.goal_y - state.y
+            distance = math.hypot(dx, dy)
+
+            if distance < self._goal_tolerance:
+                self._cmd_pubs[name].publish(Twist())
+                state.goal_reached = True
+                state.goal_active = False
+                self._status_pubs[name].publish(Bool(data=True))
+                self.get_logger().info(f"{name}: goal reached")
+                continue
+
+            target_yaw = math.atan2(dy, dx)
+            yaw_error = _normalize_angle(target_yaw - state.yaw)
+
+            twist = Twist()
+            if abs(yaw_error) > self._heading_tolerance:
+                sign = 1.0 if yaw_error > 0 else -1.0
+                twist.angular.z = sign * min(self._angular_speed, abs(yaw_error) * 2.0)
+            else:
+                twist.linear.x = min(self._linear_speed, distance * 0.5)
+                twist.angular.z = yaw_error * 2.0
+
+            self._cmd_pubs[name].publish(twist)
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = FleetController()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
+
+
+if __name__ == "__main__":
+    main()

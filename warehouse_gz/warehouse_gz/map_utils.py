@@ -14,17 +14,21 @@ def _require_positive(value: float, label: str) -> None:
 
 def parse_octile_map(path: Path) -> Tuple[int, int, Tuple[str, ...]]:
     """Parse an octile .map file and return (width, height, map_rows)."""
+    # Get the map file path and check it exists before reading
     map_path = Path(path)
     if not map_path.is_file():
         raise FileNotFoundError(f"Map file not found: {map_path}")
 
+    # Read in lines and make sure there is more than just the 4 line header
     lines = map_path.read_text(encoding="utf-8").splitlines()
     if len(lines) < 4:
         raise ValueError(f"Malformed map file {map_path}: missing required header")
 
+    # Make sure map is type octile
     if lines[0].strip() != "type octile":
         raise ValueError(f"Malformed map file {map_path}: first line must be 'type octile'")
 
+    # Make sure map matches header format
     try:
         height_key, height_value = lines[1].split(maxsplit=1)
         width_key, width_value = lines[2].split(maxsplit=1)
@@ -33,11 +37,13 @@ def parse_octile_map(path: Path) -> Tuple[int, int, Tuple[str, ...]]:
             f"Malformed map file {map_path}: expected 'height <n>' and 'width <n>'"
         ) from exc
 
+    # Make sure map matches header format
     if height_key != "height" or width_key != "width":
         raise ValueError(
             f"Malformed map file {map_path}: expected 'height <n>' then 'width <n>'"
         )
 
+    # Height and Width values must be positive ints
     try:
         height = int(height_value)
         width = int(width_value)

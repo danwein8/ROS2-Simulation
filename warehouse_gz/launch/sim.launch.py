@@ -14,6 +14,7 @@ from launch.actions import (
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -63,6 +64,17 @@ def _launch(context, *args, **kwargs):
     gen_process = ExecuteProcess(cmd=gen_cmd, output="screen")
     gz_process = ExecuteProcess(cmd=gazebo_cmd, output="screen")
 
+    controller_node = Node(
+        package="warehouse_gz",
+        executable="fleet_controller",
+        name="fleet_controller",
+        output="screen",
+        parameters=[{
+            "robot_count": cfg["spawn"]["robots"],
+            "use_sim_time": True,
+        }],
+    )
+
     return [
         gen_process,
         RegisterEventHandler(
@@ -75,6 +87,12 @@ def _launch(context, *args, **kwargs):
             OnProcessExit(
                 target_action=gen_process,
                 on_exit=[TimerAction(period=5.0, actions=[spawn_launch])],
+            )
+        ),
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=gen_process,
+                on_exit=[TimerAction(period=8.0, actions=[controller_node])],
             )
         ),
     ]

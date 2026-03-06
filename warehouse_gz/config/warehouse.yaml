@@ -1,4 +1,4 @@
-map_file: "arena.map"
+map_file: "lak103d.map"
 map_obstacle_height: 1.5
 resolution: 0.5
 origin: [-10.0, -10.0]
@@ -15,8 +15,8 @@ tasks:
   - {id: "C", x:  8.0, y: -8.0, dwell_s: 12}
 
 spawn:
-  robots: 15
+  robots: 4
   pattern: "grid"         # grid | random_free
   start_region: {xmin: -5, xmax: 5, ymin: -5, ymax: 5}
-  robot_spacing: 2.4
+  robot_spacing: 1.5
   robot_clearance: 1.1

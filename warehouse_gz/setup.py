@@ -40,6 +40,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'fleet_controller = warehouse_gz.robot_controller:main',
         ],
     },
 )
