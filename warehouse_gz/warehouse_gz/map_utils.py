@@ -4,6 +4,7 @@ import math
 from pathlib import Path
 from typing import Iterable, Optional, Set, Tuple
 
+# set of octile characters representing traversable terrain
 FREE_TERRAIN_CHARS = frozenset({".", "G", "S"})
 
 
@@ -28,7 +29,7 @@ def parse_octile_map(path: Path) -> Tuple[int, int, Tuple[str, ...]]:
     if lines[0].strip() != "type octile":
         raise ValueError(f"Malformed map file {map_path}: first line must be 'type octile'")
 
-    # Make sure map matches header format
+    # Make sure map contains header format
     try:
         height_key, height_value = lines[1].split(maxsplit=1)
         width_key, width_value = lines[2].split(maxsplit=1)
@@ -57,9 +58,12 @@ def parse_octile_map(path: Path) -> Tuple[int, int, Tuple[str, ...]]:
             f"Malformed map file {map_path}: width and height must be positive"
         )
 
+    # check for map delination line
     if lines[3].strip() != "map":
         raise ValueError(f"Malformed map file {map_path}: fourth line must be 'map'")
 
+    # create grid rows, everything except header
+    # grid must be dimensions width x height
     rows = tuple(lines[4:])
     if len(rows) != height:
         raise ValueError(
@@ -104,7 +108,9 @@ def grid_cell_to_world_center(
     """Convert a grid cell index (row, col) to world coordinates (x, y)."""
     _require_positive(resolution, "resolution")
     origin_x, origin_y = tuple(origin_xy)
+    # straightforward conversion with +0.5 to place in middle of cell
     x = origin_x + (col + 0.5) * resolution
+    # flipped axis direction from octile grid to gazebo, -0.5 to place in middle of cell
     y = origin_y + (map_height - row - 0.5) * resolution
     return x, y
 
@@ -177,6 +183,7 @@ def is_pose_clear_of_blocked_cells(
     if center_cell is None:
         return False
 
+    # create geometric search area around center_cell
     col_min = int(math.floor((x - clearance - origin_x) / resolution))
     col_max = int(math.floor((x + clearance - origin_x) / resolution))
     row_bottom_min = int(math.floor((y - clearance - origin_y) / resolution))

@@ -18,6 +18,7 @@ def merge_blocked_cells(
     blocked_cells: Set[Tuple[int, int]], map_height: int, map_width: int
 ) -> List[Tuple[int, int, int, int]]:
     """Merge blocked cells into maximal rectangles to reduce Gazebo model count.
+    Scans unvisited obstacles horizontally then vertically to greedily make rectangles.
 
     Returns a list of (row_start, col_start, row_end, col_end) inclusive rectangles.
     """
@@ -101,6 +102,7 @@ SDF_FOOTER = """
 """
 
 def box_model(name: str, x: float, y: float, z: float, sx: float, sy: float, sz: float) -> str:
+    # XML model for the obstacle boxes with collision
     return f"""
     <model name="{name}">
       <static>true</static>

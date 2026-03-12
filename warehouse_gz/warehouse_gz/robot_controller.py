@@ -11,6 +11,9 @@ from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool
 
 
+# simple class to hold the current position from odom
+# current active goal, and goal state (active, reached)
+# one RobotState per robot
 @dataclass
 class RobotState:
     x: float = 0.0
@@ -52,23 +55,28 @@ class FleetController(Node):
         self._cmd_pubs: dict[str, rclpy.publisher.Publisher] = {}
         self._status_pubs: dict[str, rclpy.publisher.Publisher] = {}
 
+        # must create these subs and pubs for each robot
         for i in range(robot_count):
             name = f"robot_{i:02d}"
             self._robots[name] = RobotState()
 
+            # get from Gazebo
             self.create_subscription(
                 Odometry,
                 f"/{name}/odom",
                 lambda msg, n=name: self._odom_cb(n, msg),
                 10,
             )
+            # get from FleetClient
             self.create_subscription(
                 PoseStamped,
                 f"/{name}/goal_pose",
                 lambda msg, n=name: self._goal_cb(n, msg),
                 10,
             )
+            # to Gazebo
             self._cmd_pubs[name] = self.create_publisher(Twist, f"/{name}/cmd_vel", 10)
+            # to FleetClient
             self._status_pubs[name] = self.create_publisher(Bool, f"/{name}/goal_status", 10)
 
         self.create_timer(0.05, self._control_loop)  # 20 Hz
@@ -98,10 +106,12 @@ class FleetController(Node):
             if not state.goal_active or state.goal_reached:
                 continue
 
+            # compute distance to goal
             dx = state.goal_x - state.x
             dy = state.goal_y - state.y
             distance = math.hypot(dx, dy)
 
+            # if within tolerance stop robot and publish goal status
             if distance < self._goal_tolerance:
                 self._cmd_pubs[name].publish(Twist())
                 state.goal_reached = True
@@ -110,13 +120,16 @@ class FleetController(Node):
                 self.get_logger().info(f"{name}: goal reached")
                 continue
 
+            # otherwise compute angle and heading error to face goal
             target_yaw = math.atan2(dy, dx)
             yaw_error = _normalize_angle(target_yaw - state.yaw)
 
             twist = Twist()
+            # if heading error is large just turn
             if abs(yaw_error) > self._heading_tolerance:
                 sign = 1.0 if yaw_error > 0 else -1.0
                 twist.angular.z = sign * min(self._angular_speed, abs(yaw_error) * 2.0)
+            # if its correct go forward, slowing as we get closer to avoid overshoot
             else:
                 twist.linear.x = min(self._linear_speed, distance * 0.5)
                 twist.angular.z = yaw_error * 2.0
