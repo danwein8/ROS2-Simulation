@@ -6,12 +6,14 @@ import yaml
 
 try:
     from warehouse_gz.map_utils import (
+        enclose_map,
         grid_cell_to_world_center,
+        is_map_enclosed,
         load_blocked_cells,
         parse_octile_map,
     )
 except ImportError:
-    from map_utils import grid_cell_to_world_center, load_blocked_cells, parse_octile_map
+    from map_utils import enclose_map, grid_cell_to_world_center, is_map_enclosed, load_blocked_cells, parse_octile_map
 
 
 def merge_blocked_cells(
@@ -172,8 +174,18 @@ def main():
         )
 
     map_path = Path(args.map)
-    map_width, map_height, _rows = parse_octile_map(map_path)
-    blocked_cells = load_blocked_cells(map_path)
+    map_width, map_height, rows = parse_octile_map(map_path)
+
+    if not is_map_enclosed(rows):
+        rows, map_width, map_height = enclose_map(rows, map_width, map_height)
+        print(f"[gen_world] Map border was open — wrapped with '@' border (new size: {map_width}x{map_height})")
+
+    blocked_cells = {
+        (r, c)
+        for r, row in enumerate(rows)
+        for c, ch in enumerate(row)
+        if ch not in {".", "G", "S"}
+    }
     rectangles = merge_blocked_cells(blocked_cells, map_height, map_width)
 
     parts = [SDF_HEADER]
