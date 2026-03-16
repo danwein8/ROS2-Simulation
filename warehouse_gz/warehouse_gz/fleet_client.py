@@ -42,17 +42,17 @@ class FleetClient:
     def __init__(
         self,
         robot_names: Optional[List[str]] = None,
-        robot_count: int = 3,
+        robot_count: int = 0,
     ):
-        try:
-            pkg_share = Path(get_package_share_directory("warehouse_gz"))
-            cfg_path = pkg_share / "config" / "warehouse.yaml"
-            cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
-            robot_count = cfg["spawn"]["robots"]
-        except:
-            raise ValueError(f"Malformed config file")
-        
         if robot_names is None:
+            try:
+                pkg_share = Path(get_package_share_directory("warehouse_gz"))
+                cfg_path = pkg_share / "config" / "warehouse.yaml"
+                cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+                robot_count = cfg["spawn"]["robots"]
+            except Exception:
+                raise ValueError(f"Malformed config file")
+        
             robot_names = [f"robot_{i:02d}" for i in range(robot_count)]
         self._names = robot_names
 
