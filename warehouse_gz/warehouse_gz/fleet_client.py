@@ -12,6 +12,8 @@ Usage::
 
 import math
 import threading
+import yaml
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import rclpy
@@ -21,6 +23,7 @@ from rclpy.parameter import Parameter
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool
+from ament_index_python.packages import get_package_share_directory
 
 
 def _yaw_from_quat(q) -> float:
@@ -41,6 +44,14 @@ class FleetClient:
         robot_names: Optional[List[str]] = None,
         robot_count: int = 3,
     ):
+        try:
+            pkg_share = Path(get_package_share_directory("warehouse_gz"))
+            cfg_path = pkg_share / "config" / "warehouse.yaml"
+            cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            robot_count = cfg["spawn"]["robots"]
+        except:
+            raise ValueError(f"Malformed config file")
+        
         if robot_names is None:
             robot_names = [f"robot_{i:02d}" for i in range(robot_count)]
         self._names = robot_names
