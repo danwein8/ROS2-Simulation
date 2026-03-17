@@ -1,14 +1,17 @@
 """Fleet controller node: drives multiple robots to waypoint goals."""
 
 import math
+import yaml
 from dataclasses import dataclass, field
 from typing import Optional
+from pathlib import Path
 
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool
+from ament_index_python.packages import get_package_share_directory
 
 
 # simple class to hold the current position from odom
@@ -39,7 +42,12 @@ class FleetController(Node):
     def __init__(self):
         super().__init__("fleet_controller")
 
-        self.declare_parameter("robot_count", 3)
+        pkg_share = Path(get_package_share_directory("warehouse_gz"))
+        cfg_path = pkg_share / "config" / "warehouse.yaml"
+        cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        num_robs = cfg["spawn"]["robots"]
+
+        self.declare_parameter("robot_count", num_robs)
         self.declare_parameter("linear_speed", 0.5)
         self.declare_parameter("angular_speed", 1.0)
         self.declare_parameter("goal_tolerance", 0.15)
