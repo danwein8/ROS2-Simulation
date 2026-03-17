@@ -106,9 +106,8 @@ def is_blocked_char(cell: str) -> bool:
     return cell not in FREE_TERRAIN_CHARS
 
 
-def load_blocked_cells(path: Path) -> Set[Tuple[int, int]]:
-    """Load blocked cells as (row, col) from an octile map file."""
-    _width, _height, rows = parse_octile_map(path)
+def load_blocked_cells(rows: Tuple[str, ...]) -> Set[Tuple[int, int]]:
+    """Return blocked cells as (row, col) from parsed map rows."""
     blocked: Set[Tuple[int, int]] = set()
     for row_index, row in enumerate(rows):
         for col_index, value in enumerate(row):

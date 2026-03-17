@@ -180,12 +180,7 @@ def main():
         rows, map_width, map_height = enclose_map(rows, map_width, map_height)
         print(f"[gen_world] Map border was open — wrapped with '@' border (new size: {map_width}x{map_height})")
 
-    blocked_cells = {
-        (r, c)
-        for r, row in enumerate(rows)
-        for c, ch in enumerate(row)
-        if ch not in {".", "G", "S"}
-    }
+    blocked_cells = load_blocked_cells(rows)
     rectangles = merge_blocked_cells(blocked_cells, map_height, map_width)
 
     parts = [SDF_HEADER]
