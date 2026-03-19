@@ -8,6 +8,25 @@ from typing import Iterable, Optional, Set, Tuple
 FREE_TERRAIN_CHARS = frozenset({".", "G", "S"})
 
 
+def is_map_enclosed(rows: Tuple[str, ...]) -> bool:
+    """Return True if every border cell is a blocked character."""
+    border_chars = (
+        set(rows[0]) | set(rows[-1])
+        | {rows[r][0] for r in range(len(rows))}
+        | {rows[r][-1] for r in range(len(rows))}
+    )
+    return not (border_chars & FREE_TERRAIN_CHARS)
+
+
+def enclose_map(
+    rows: Tuple[str, ...], width: int, height: int
+) -> Tuple[Tuple[str, ...], int, int]:
+    """Wrap the map in a ring of '@', returning (new_rows, new_width, new_height)."""
+    border = "@" * (width + 2)
+    new_rows = tuple([border] + ["@" + r + "@" for r in rows] + [border])
+    return new_rows, width + 2, height + 2
+
+
 def _require_positive(value: float, label: str) -> None:
     if value <= 0.0:
         raise ValueError(f"{label} must be > 0, got {value}")
@@ -87,9 +106,8 @@ def is_blocked_char(cell: str) -> bool:
     return cell not in FREE_TERRAIN_CHARS
 
 
-def load_blocked_cells(path: Path) -> Set[Tuple[int, int]]:
-    """Load blocked cells as (row, col) from an octile map file."""
-    _width, _height, rows = parse_octile_map(path)
+def load_blocked_cells(rows: Tuple[str, ...]) -> Set[Tuple[int, int]]:
+    """Return blocked cells as (row, col) from parsed map rows."""
     blocked: Set[Tuple[int, int]] = set()
     for row_index, row in enumerate(rows):
         for col_index, value in enumerate(row):

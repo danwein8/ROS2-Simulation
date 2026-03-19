@@ -50,8 +50,8 @@ def _launch(context, *args, **kwargs):
     cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
 
     map_path = _resolve_map_path(context=context, cfg=cfg, cfg_path=cfg_path, pkg_share=pkg_share)
-    map_width, map_height, _rows = parse_octile_map(map_path)
-    blocked_cells = load_blocked_cells(map_path)
+    map_width, map_height, rows = parse_octile_map(map_path)
+    blocked_cells = load_blocked_cells(rows)
 
     resolution = float(cfg["resolution"])
     if resolution <= 0.0:
