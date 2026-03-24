@@ -13,6 +13,7 @@ from warehouse_gz.map_utils import (
     is_pose_clear_of_blocked_cells,
     load_blocked_cells,
     parse_octile_map,
+    grid_cell_to_world_center
 )
 
 
@@ -76,25 +77,37 @@ def _launch(context, *args, **kwargs):
     if pattern != "grid":
         pattern = "grid"
 
-    nx = int(math.floor((xmax - xmin) / spacing)) + 1
-    ny = int(math.floor((ymax - ymin) / spacing)) + 1
-    candidates = _make_grid_poses(nx * ny, xmin, xmax, ymin, ymax, spacing)
-    poses = []
-    for x, y, z, rr, pp, yy in candidates:
-        is_free = is_pose_clear_of_blocked_cells(
-            x=x,
-            y=y,
-            clearance=robot_clearance,
-            blocked_cells=blocked_cells,
-            origin_xy=origin_xy,
-            resolution=resolution,
-            map_height=map_height,
-            map_width=map_width,
-        )
-        if is_free:
-            poses.append((x, y, z, rr, pp, yy))
-            if len(poses) >= n:
-                break
+    start_positions_str = LaunchConfiguration("start_positions").perform(context).strip()
+    
+    if start_positions_str:
+        # parse the "row,col;row,col;..." into world poses
+        pairs = start_positions_str.split(";")
+        poses = []
+        for pair in pairs:
+            row, col = map(int, pair.split(","))
+            world_x, world_y = grid_cell_to_world_center(row, col, origin_xy, resolution, map_height)
+            poses.append((world_x, world_y, 0.3, 0.0, 0.0, 0.0))
+        n = len(poses)
+    else:
+        nx = int(math.floor((xmax - xmin) / spacing)) + 1
+        ny = int(math.floor((ymax - ymin) / spacing)) + 1
+        candidates = _make_grid_poses(nx * ny, xmin, xmax, ymin, ymax, spacing)
+        poses = []
+        for x, y, z, rr, pp, yy in candidates:
+            is_free = is_pose_clear_of_blocked_cells(
+                x=x,
+                y=y,
+                clearance=robot_clearance,
+                blocked_cells=blocked_cells,
+                origin_xy=origin_xy,
+                resolution=resolution,
+                map_height=map_height,
+                map_width=map_width,
+            )
+            if is_free:
+                poses.append((x, y, z, rr, pp, yy))
+                if len(poses) >= n:
+                    break
 
     if len(poses) < n:
         raise RuntimeError(
@@ -201,6 +214,14 @@ def generate_launch_description():
                 description=(
                     "Optional map filename from warehouse_gz/maps. "
                     "If empty, use config/warehouse.yaml map_file."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "start_positions",
+                default_value="",
+                description=(
+                    "Optional agent start positions from outside program. "
+                    "If empty, use default grid pattern generation."
                 ),
             ),
             OpaqueFunction(function=_launch),
