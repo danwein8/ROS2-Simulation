@@ -25,6 +25,15 @@ from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool
 from ament_index_python.packages import get_package_share_directory
 
+try:
+    from warehouse_gz.map_utils import (
+        grid_cell_to_world_center,
+        world_to_grid_cell,
+        parse_octile_map
+    )
+except ImportError:
+    from map_utils import grid_cell_to_world_center, world_to_grid_cell, parse_octile_map
+
 
 def _yaw_from_quat(q) -> float:
     siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
@@ -44,17 +53,23 @@ class FleetClient:
         robot_names: Optional[List[str]] = None,
         robot_count: int = 0,
     ):
-        if robot_names is None:
-            try:
-                pkg_share = Path(get_package_share_directory("warehouse_gz"))
-                cfg_path = pkg_share / "config" / "warehouse.yaml"
-                cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
-                robot_count = cfg["spawn"]["robots"]
-            except Exception:
-                raise ValueError(f"Malformed config file")
+        try:
+            pkg_share = Path(get_package_share_directory("warehouse_gz"))
+            cfg_path = pkg_share / "config" / "warehouse.yaml"
+            cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            raise ValueError(f"Malformed config file")
         
+        if robot_names is None:
+            robot_count = cfg["spawn"]["robots"]
             robot_names = [f"robot_{i:02d}" for i in range(robot_count)]
+        
         self._names = robot_names
+
+        self._resolution = cfg["resolution"]
+        self._origin = cfg["origin"]
+        map_path = pkg_share / "maps" / cfg["map_file"]
+        self._map_width, self._map_height, self._rows = parse_octile_map(map_path)
 
         if not rclpy.ok():
             rclpy.init()
@@ -153,6 +168,14 @@ class FleetClient:
         """Non-blocking goal status check."""
         with self._lock:
             return self._goal_reached.get(robot_name, False)
+        
+    def send_grid_goal(self, robot_name: str, row: int, col: int) -> None:
+        position = grid_cell_to_world_center(row, col, self._origin, self._resolution, self._map_height)
+        self.send_goal(robot_name, position[0], position[1])
+
+    def get_grid_position(self, robot_name: str) -> Tuple[int, int]:
+        position = self.get_position(robot_name)
+        return world_to_grid_cell(position[0], position[1], self._origin, self._resolution, self._map_height, self._map_width)
 
     # ---- lifecycle ----
 
