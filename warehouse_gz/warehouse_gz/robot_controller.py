@@ -52,12 +52,14 @@ class FleetController(Node):
         self.declare_parameter("angular_speed", 1.0)
         self.declare_parameter("goal_tolerance", 0.15)
         self.declare_parameter("heading_tolerance", 0.1)
+        self.declare_parameter("collision_buffer", 0.8)
 
         robot_count = self.get_parameter("robot_count").value
         self._linear_speed = self.get_parameter("linear_speed").value
         self._angular_speed = self.get_parameter("angular_speed").value
         self._goal_tolerance = self.get_parameter("goal_tolerance").value
         self._heading_tolerance = self.get_parameter("heading_tolerance").value
+        self._collision_buffer = self.get_parameter("collision_buffer").value
 
         self._robots: dict[str, RobotState] = {}
         self._cmd_pubs: dict[str, rclpy.publisher.Publisher] = {}
@@ -109,9 +111,26 @@ class FleetController(Node):
             f"{name}: new goal ({state.goal_x:.2f}, {state.goal_y:.2f})"
         )
 
+    def _too_close(self, name: str) -> bool:
+        state = self._robots[name]
+        for other_name, other_state in self._robots.items():
+            if other_name == name:
+                continue
+            if math.hypot(other_state.x - state.x, other_state.y - state.y) < self._collision_buffer:
+                return True
+        return False
+
     def _control_loop(self):
         for name, state in self._robots.items():
             if not state.goal_active or state.goal_reached:
+                continue
+
+            if self._too_close(name):
+                self._cmd_pubs[name].publish(Twist())
+                self.get_logger().warn(
+                    f"{name}: collision buffer stop",
+                    throttle_duration_sec=2.0,
+                )
                 continue
 
             # compute distance to goal
