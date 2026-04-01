@@ -157,7 +157,7 @@ class FleetClient:
         with self._lock:
             return dict(self._positions)
 
-    def wait_for_goal(self, robot_name: str, timeout: float = 30.0) -> bool:
+    def wait_for_goal(self, robot_name: str, timeout: float = 10.0) -> bool:
         """Block until the robot reaches its goal or *timeout* seconds elapse.
 
         Returns ``True`` if the goal was reached, ``False`` on timeout.
@@ -176,6 +176,23 @@ class FleetClient:
     def get_grid_position(self, robot_name: str) -> Tuple[int, int]:
         position = self.get_position(robot_name)
         return world_to_grid_cell(position[0], position[1], self._origin, self._resolution, self._map_height, self._map_width)
+    
+    def execute_plan(self, plan: list[Dict]) -> None:
+        """plan should be a list of timesteps and each timestep is a dict mapping 
+        robot names to grid cells:
+        plan = [
+            {"robot_00":(3,4), "robot_01": (5,6)},
+            {"robot_00":(3,5), "robot_01": (5,7)}
+            ...
+        ]
+        """
+        for i, timestep in enumerate(plan):
+            for robot_name, (row, col) in timestep.items():
+                self.send_grid_goal(robot_name, row, col)
+            # wait for all robots to finish before next timestep
+            for robot_name in timestep:
+                if not self.wait_for_goal(robot_name):
+                    self._node.get_logger().info(f'Robot {robot_name} failed navigation at timestep {i}')
 
     # ---- lifecycle ----
 
