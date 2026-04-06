@@ -89,6 +89,7 @@ class FleetClient:
         self._resolution = cfg["resolution"]
         self._origin = cfg["origin"]
         map_path = pkg_share / "maps" / cfg["map_file"]
+        self._map_name = Path(map_path).name
         self._map_width, self._map_height, self._rows = parse_octile_map(map_path)
 
         if not rclpy.ok():
@@ -176,6 +177,12 @@ class FleetClient:
         """Return positions for all robots that have reported odom."""
         with self._lock:
             return dict(self._positions)
+        
+    def get_map_info(self) -> Tuple[str, Tuple[int, int], float, List[float]]:
+        """Returns the current simulations map information to ensure
+        map information matches what is being run by the external program
+        return: map filename, map dimensions, map resolution, and origin"""
+        return (self._map_name, (self._map_height, self._map_width), self._resolution, self._origin)
 
     def wait_for_goal(self, robot_name: str, timeout: float = 10.0) -> bool:
         """Block until the robot reaches its goal or *timeout* seconds elapse.
