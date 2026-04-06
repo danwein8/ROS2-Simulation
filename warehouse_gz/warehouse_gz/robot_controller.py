@@ -5,11 +5,12 @@ import yaml
 from dataclasses import dataclass, field
 from typing import Optional
 from pathlib import Path
+from collections import deque
 
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped, Twist
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, Path as RosPath
 from std_msgs.msg import Bool
 from ament_index_python.packages import get_package_share_directory
 
@@ -22,8 +23,8 @@ class RobotState:
     x: float = 0.0
     y: float = 0.0
     yaw: float = 0.0
-    goal_x: Optional[float] = None
-    goal_y: Optional[float] = None
+    waypoint_index: int = 0
+    waypoint_queue: deque = field(default_factory=deque)
     goal_active: bool = False
     goal_reached: bool = False
 
@@ -52,7 +53,7 @@ class FleetController(Node):
         self.declare_parameter("angular_speed", 1.0)
         self.declare_parameter("goal_tolerance", 0.15)
         self.declare_parameter("heading_tolerance", 0.1)
-        self.declare_parameter("collision_buffer", 0.8)
+        self.declare_parameter("collision_buffer", 0.001)
 
         robot_count = self.get_parameter("robot_count").value
         self._linear_speed = self.get_parameter("linear_speed").value
@@ -77,13 +78,14 @@ class FleetController(Node):
                 lambda msg, n=name: self._odom_cb(n, msg),
                 10,
             )
-            # get from FleetClient
+            # Path subscription
             self.create_subscription(
-                PoseStamped,
-                f"/{name}/goal_pose",
-                lambda msg, n=name: self._goal_cb(n, msg),
+                RosPath,
+                f"/{name}/goal_path",
+                lambda msg, n=name: self._path_cb(n, msg),
                 10,
             )
+
             # to Gazebo
             self._cmd_pubs[name] = self.create_publisher(Twist, f"/{name}/cmd_vel", 10)
             # to FleetClient
@@ -99,17 +101,16 @@ class FleetController(Node):
         state.x = msg.pose.pose.position.x
         state.y = msg.pose.pose.position.y
         state.yaw = _yaw_from_quat(msg.pose.pose.orientation)
-
-    def _goal_cb(self, name: str, msg: PoseStamped):
+    
+    def _path_cb(self, name: str, msg: RosPath):
         state = self._robots[name]
-        state.goal_x = msg.pose.position.x
-        state.goal_y = msg.pose.position.y
+        state.waypoint_queue = deque((pose.pose.position.x, pose.pose.position.y) for pose in msg.poses)
+        state.waypoint_index = 0
         state.goal_active = True
         state.goal_reached = False
         self._status_pubs[name].publish(Bool(data=False))
-        self.get_logger().info(
-            f"{name}: new goal ({state.goal_x:.2f}, {state.goal_y:.2f})"
-        )
+        self.get_logger().info(f"{name}: received path with {len(msg.poses)} waypoints")
+
 
     def _too_close(self, name: str) -> bool:
         state = self._robots[name]
@@ -125,26 +126,30 @@ class FleetController(Node):
             if not state.goal_active or state.goal_reached:
                 continue
 
-            if self._too_close(name):
-                self._cmd_pubs[name].publish(Twist())
-                self.get_logger().warn(
-                    f"{name}: collision buffer stop",
-                    throttle_duration_sec=2.0,
-                )
-                continue
+            # if self._too_close(name):
+            #     self._cmd_pubs[name].publish(Twist())
+            #     self.get_logger().warn(
+            #         f"{name}: collision buffer stop",
+            #         throttle_duration_sec=2.0,
+            #     )
+            #     continue
 
             # compute distance to goal
-            dx = state.goal_x - state.x
-            dy = state.goal_y - state.y
+            goal_x, goal_y = state.waypoint_queue[state.waypoint_index]
+            dx = goal_x - state.x
+            dy = goal_y - state.y
             distance = math.hypot(dx, dy)
 
             # if within tolerance stop robot and publish goal status
             if distance < self._goal_tolerance:
-                self._cmd_pubs[name].publish(Twist())
-                state.goal_reached = True
-                state.goal_active = False
-                self._status_pubs[name].publish(Bool(data=True))
-                self.get_logger().info(f"{name}: goal reached")
+                if state.waypoint_index >= len(state.waypoint_queue) - 1:
+                    self._cmd_pubs[name].publish(Twist())
+                    state.goal_reached = True
+                    state.goal_active = False
+                    self._status_pubs[name].publish(Bool(data=True))
+                    self.get_logger().info(f"{name}: goal reached")
+                else:
+                    state.waypoint_index += 1
                 continue
 
             # otherwise compute angle and heading error to face goal

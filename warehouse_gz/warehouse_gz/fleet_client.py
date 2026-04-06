@@ -16,7 +16,7 @@ import yaml
 import json
 import datetime
 from datetime import timedelta
-from pathlib import Path
+from pathlib import Path as FilePath
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
@@ -27,7 +27,7 @@ from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, Path as RosPath
 from std_msgs.msg import Bool
 from ament_index_python.packages import get_package_share_directory
 
@@ -74,7 +74,7 @@ class FleetClient:
         robot_count: int = 0,
     ):
         try:
-            pkg_share = Path(get_package_share_directory("warehouse_gz"))
+            pkg_share = FilePath(get_package_share_directory("warehouse_gz"))
             cfg_path = pkg_share / "config" / "warehouse.yaml"
             cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
         except Exception:
@@ -89,6 +89,7 @@ class FleetClient:
         self._resolution = cfg["resolution"]
         self._origin = cfg["origin"]
         map_path = pkg_share / "maps" / cfg["map_file"]
+        self._map_name = FilePath(map_path).name
         self._map_width, self._map_height, self._rows = parse_octile_map(map_path)
 
         if not rclpy.ok():
@@ -121,8 +122,11 @@ class FleetClient:
                 lambda msg, n=name: self._status_cb(n, msg),
                 10,
             )
+            # self._goal_pubs[name] = self._node.create_publisher(
+            #     PoseStamped, f"/{name}/goal_pose", 10
+            # )
             self._goal_pubs[name] = self._node.create_publisher(
-                PoseStamped, f"/{name}/goal_pose", 10
+                RosPath, f"/{name}/goal_path", 10
             )
 
         self._executor = SingleThreadedExecutor()
@@ -156,11 +160,15 @@ class FleetClient:
             self._goal_reached[robot_name] = False
         self._goal_events[robot_name].clear()
 
-        msg = PoseStamped()
+        pose = PoseStamped()
+        pose.header.frame_id = "world"
+        pose.pose.position.x = float(x)
+        pose.pose.position.y = float(y)
+        pose.pose.orientation.w = 1.0
+
+        msg = RosPath()
         msg.header.frame_id = "world"
-        msg.pose.position.x = float(x)
-        msg.pose.position.y = float(y)
-        msg.pose.orientation.w = 1.0
+        msg.poses = [pose]
         self._goal_pubs[robot_name].publish(msg)
 
     def get_position(self, robot_name: str) -> Tuple[float, float, float]:
@@ -176,6 +184,12 @@ class FleetClient:
         """Return positions for all robots that have reported odom."""
         with self._lock:
             return dict(self._positions)
+        
+    def get_map_info(self) -> Tuple[str, Tuple[int, int], float, List[float]]:
+        """Returns the current simulations map information to ensure
+        map information matches what is being run by the external program
+        return: map filename, map dimensions, map resolution, and origin"""
+        return (self._map_name, (self._map_height, self._map_width), self._resolution, self._origin)
 
     def wait_for_goal(self, robot_name: str, timeout: float = 10.0) -> bool:
         """Block until the robot reaches its goal or *timeout* seconds elapse.
