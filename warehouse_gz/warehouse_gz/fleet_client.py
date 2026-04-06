@@ -13,10 +13,16 @@ Usage::
 import math
 import threading
 import yaml
+import json
+import datetime
+from datetime import timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
 
 import rclpy
+from rclpy.time import Time
+from builtin_interfaces.msg import Time as TimeMsg
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.parameter import Parameter
@@ -39,6 +45,20 @@ def _yaw_from_quat(q) -> float:
     siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
     cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
     return math.atan2(siny_cosp, cosy_cosp)
+
+@dataclass
+class Results:
+    timestep: int
+    # wallclock start time
+    wall_clock_time: datetime.datetime
+    # sim start time
+    sim_time: Time
+    # did robot x complete timestep i?
+    complete: Dict[str, bool] = field(default_factory=dict)
+    # time to complete (blocking behavior may cause increasing finishing times)
+    completion_time: Dict[str, timedelta] = field(default_factory=dict)
+    # how far from goal robot ended
+    position_error: Dict[str, Tuple[float, float]] = field(default_factory=dict)
 
 
 class FleetClient:
@@ -177,7 +197,7 @@ class FleetClient:
         position = self.get_position(robot_name)
         return world_to_grid_cell(position[0], position[1], self._origin, self._resolution, self._map_height, self._map_width)
     
-    def execute_plan(self, plan: list[Dict]) -> None:
+    def execute_plan(self, plan: list[Dict]) -> List[Results]:
         """plan should be a list of timesteps and each timestep is a dict mapping 
         robot names to grid cells:
         plan = [
@@ -186,13 +206,42 @@ class FleetClient:
             ...
         ]
         """
+        result_list = []
         for i, timestep in enumerate(plan):
+            start = datetime.datetime.now()
+            res = Results(i, start, self._node.get_clock().now())
+            complete = {robot: True for robot in timestep}
+            completion_time = {r: 0.0 for r in timestep}
+            pos_error = {rb: 0.0 for rb in timestep}
             for robot_name, (row, col) in timestep.items():
                 self.send_grid_goal(robot_name, row, col)
             # wait for all robots to finish before next timestep
-            for robot_name in timestep:
+            for robot_name, (row, col) in timestep.items():
                 if not self.wait_for_goal(robot_name):
                     self._node.get_logger().info(f'Robot {robot_name} failed navigation at timestep {i}')
+                    complete[robot_name] = False
+                completion_time[robot_name] = datetime.datetime.now() - start
+                curr_pos = self.get_position(robot_name)
+                desired_pos = grid_cell_to_world_center(row, col, self._origin, self._resolution, self._map_height)
+                pos_error[robot_name] = (curr_pos[0] - desired_pos[0], curr_pos[1] - desired_pos[1])
+            res.complete = complete
+            res.completion_time = completion_time
+            res.position_error = pos_error
+            result_list.append(res)
+        return result_list
+
+    def load_plan_from_file(self, path: str) -> List[Results]:
+        """For stored plans that external programs create and write.
+        Path should be a json file that has the format to feed into execute_plan()
+        plan = [
+            {"robot_00":(3,4), "robot_01": (5,6)},
+            {"robot_00":(3,5), "robot_01": (5,7)}
+            ...
+        ]
+        """
+        with open(path, 'r') as file:
+            data = json.load(file)
+            return self.execute_plan(data)
 
     # ---- lifecycle ----
 
