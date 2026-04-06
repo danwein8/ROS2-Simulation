@@ -27,7 +27,7 @@ from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import Odometry, Path
+from nav_msgs.msg import Odometry, Path as RosPath
 from std_msgs.msg import Bool
 from ament_index_python.packages import get_package_share_directory
 
@@ -126,7 +126,7 @@ class FleetClient:
             #     PoseStamped, f"/{name}/goal_pose", 10
             # )
             self._goal_pubs[name] = self._node.create_publisher(
-                Path, f"/{name}/goal_path", 10
+                RosPath, f"/{name}/goal_path", 10
             )
 
         self._executor = SingleThreadedExecutor()
@@ -166,7 +166,7 @@ class FleetClient:
         pose.pose.position.y = float(y)
         pose.pose.orientation.w = 1.0
 
-        msg = Path()
+        msg = RosPath()
         msg.header.frame_id = "world"
         msg.poses = [pose]
         self._goal_pubs[robot_name].publish(msg)
