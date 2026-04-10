@@ -9,7 +9,7 @@ from pathlib import Path
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped, Twist
-from nav_msgs.msg import Odometry, Path as NavPath
+from nav_msgs.msg import Odometry, Path as RosPath
 from std_msgs.msg import Bool
 from ament_index_python.packages import get_package_share_directory
 
@@ -52,7 +52,7 @@ class FleetController(Node):
         self.declare_parameter("angular_speed", 1.0)
         self.declare_parameter("goal_tolerance", 0.15)
         self.declare_parameter("heading_tolerance", 0.1)
-        self.declare_parameter("collision_buffer", 0.8)
+        self.declare_parameter("collision_buffer", 0.001)
 
         robot_count = self.get_parameter("robot_count").value
         self._linear_speed = self.get_parameter("linear_speed").value
@@ -77,20 +77,14 @@ class FleetController(Node):
                 lambda msg, n=name: self._odom_cb(n, msg),
                 10,
             )
-            # get from FleetClient (single waypoint)
+            # Path subscription
             self.create_subscription(
-                PoseStamped,
-                f"/{name}/goal_pose",
-                lambda msg, n=name: self._goal_cb(n, msg),
-                10,
-            )
-            # get from FleetClient (multi-waypoint path)
-            self.create_subscription(
-                NavPath,
+                RosPath,
                 f"/{name}/goal_path",
                 lambda msg, n=name: self._path_cb(n, msg),
                 10,
             )
+
             # to Gazebo
             self._cmd_pubs[name] = self.create_publisher(Twist, f"/{name}/cmd_vel", 10)
             # to FleetClient
@@ -107,18 +101,7 @@ class FleetController(Node):
         state.y = msg.pose.pose.position.y
         state.yaw = _yaw_from_quat(msg.pose.pose.orientation)
 
-    def _goal_cb(self, name: str, msg: PoseStamped):
-        state = self._robots[name]
-        state.waypoints = [(msg.pose.position.x, msg.pose.position.y)]
-        state.waypoint_index = 0
-        state.goal_active = True
-        state.goal_reached = False
-        self._status_pubs[name].publish(Bool(data=False))
-        self.get_logger().info(
-            f"{name}: new goal ({state.waypoints[0][0]:.2f}, {state.waypoints[0][1]:.2f})"
-        )
-
-    def _path_cb(self, name: str, msg: NavPath):
+    def _path_cb(self, name: str, msg: RosPath):
         state = self._robots[name]
         state.waypoints = [
             (pose.pose.position.x, pose.pose.position.y)
@@ -135,7 +118,7 @@ class FleetController(Node):
         state.goal_reached = False
         self._status_pubs[name].publish(Bool(data=False))
         self.get_logger().info(
-            f"{name}: new path with {len(state.waypoints)} waypoints"
+            f"{name}: received path with {len(state.waypoints)} waypoints"
         )
 
     def _too_close(self, name: str) -> bool:
@@ -152,13 +135,13 @@ class FleetController(Node):
             if not state.goal_active or state.goal_reached:
                 continue
 
-            if self._too_close(name):
-                self._cmd_pubs[name].publish(Twist())
-                self.get_logger().warn(
-                    f"{name}: collision buffer stop",
-                    throttle_duration_sec=2.0,
-                )
-                continue
+            # if self._too_close(name):
+            #     self._cmd_pubs[name].publish(Twist())
+            #     self.get_logger().warn(
+            #         f"{name}: collision buffer stop",
+            #         throttle_duration_sec=2.0,
+            #     )
+            #     continue
 
             # current waypoint is at waypoint_index
             wp_x, wp_y = state.waypoints[state.waypoint_index]

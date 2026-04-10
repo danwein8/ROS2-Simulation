@@ -24,7 +24,7 @@ def _launch(context, *args, **kwargs):
     cfg_path = pkg_share / "config" / "warehouse.yaml"
     cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
 
-    # NOTE: what is LaunchConfiguration().perform(context)
+    # resolved now bc its used here
     map_override = LaunchConfiguration("map_file").perform(context).strip()
     map_file = map_override or str(cfg.get("map_file", "")).strip()
     if not map_file:
@@ -35,6 +35,13 @@ def _launch(context, *args, **kwargs):
     map_path = pkg_share / "maps" / map_file
     if not map_path.is_file():
         raise RuntimeError(f"Map file not found: {map_path}")
+    
+    # define then overwrite if start_positions is passed in
+    n = int(cfg["spawn"]["robots"])
+    start_pos_override = LaunchConfiguration("start_positions").perform(context).strip()
+    if start_pos_override:
+        pairs = start_pos_override.split(";")
+        n = len(pairs)
 
     # create worlds dir if it doesn't exist, and set the world path
     worlds_dir = pkg_share / "worlds"
@@ -49,7 +56,8 @@ def _launch(context, *args, **kwargs):
         str(cfg_path),
         "--map",
         str(map_path),
-        "--out", str(world_path),
+        "--out", 
+        str(world_path),
     ]
 
     # command to launch gazebo with the generated world file
@@ -58,7 +66,10 @@ def _launch(context, *args, **kwargs):
     # spawn the robots after a delay to allow gazebo to start up
     spawn_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(str(pkg_share / "launch" / "spawn.launch.py")),
-        launch_arguments={"map_file": map_file}.items(),
+        launch_arguments={
+            "map_file": map_file,
+            "start_positions": LaunchConfiguration("start_positions"),
+        }.items(),
     )
 
     gen_process = ExecuteProcess(cmd=gen_cmd, output="screen")
@@ -70,7 +81,7 @@ def _launch(context, *args, **kwargs):
         name="fleet_controller",
         output="screen",
         parameters=[{
-            "robot_count": cfg["spawn"]["robots"],
+            "robot_count": n,
             "use_sim_time": True,
         }],
     )
@@ -107,6 +118,14 @@ def generate_launch_description():
                 description=(
                     "Optional map filename from warehouse_gz/maps. "
                     "If empty, use config/warehouse.yaml map_file."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "start_positions",
+                default_value="",
+                description=(
+                    "Optional agent start positions from outside program. "
+                    "If empty, use default grid pattern generation."
                 ),
             ),
             OpaqueFunction(function=_launch),
