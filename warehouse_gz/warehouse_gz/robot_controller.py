@@ -3,13 +3,13 @@
 import math
 import yaml
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import List, Optional, Tuple
 from pathlib import Path
 
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped, Twist
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, Path as NavPath
 from std_msgs.msg import Bool
 from ament_index_python.packages import get_package_share_directory
 
@@ -22,8 +22,8 @@ class RobotState:
     x: float = 0.0
     y: float = 0.0
     yaw: float = 0.0
-    goal_x: Optional[float] = None
-    goal_y: Optional[float] = None
+    waypoints: List[Tuple[float, float]] = field(default_factory=list)
+    waypoint_index: int = 0
     goal_active: bool = False
     goal_reached: bool = False
 
@@ -77,11 +77,18 @@ class FleetController(Node):
                 lambda msg, n=name: self._odom_cb(n, msg),
                 10,
             )
-            # get from FleetClient
+            # get from FleetClient (single waypoint)
             self.create_subscription(
                 PoseStamped,
                 f"/{name}/goal_pose",
                 lambda msg, n=name: self._goal_cb(n, msg),
+                10,
+            )
+            # get from FleetClient (multi-waypoint path)
+            self.create_subscription(
+                NavPath,
+                f"/{name}/goal_path",
+                lambda msg, n=name: self._path_cb(n, msg),
                 10,
             )
             # to Gazebo
@@ -102,13 +109,33 @@ class FleetController(Node):
 
     def _goal_cb(self, name: str, msg: PoseStamped):
         state = self._robots[name]
-        state.goal_x = msg.pose.position.x
-        state.goal_y = msg.pose.position.y
+        state.waypoints = [(msg.pose.position.x, msg.pose.position.y)]
+        state.waypoint_index = 0
         state.goal_active = True
         state.goal_reached = False
         self._status_pubs[name].publish(Bool(data=False))
         self.get_logger().info(
-            f"{name}: new goal ({state.goal_x:.2f}, {state.goal_y:.2f})"
+            f"{name}: new goal ({state.waypoints[0][0]:.2f}, {state.waypoints[0][1]:.2f})"
+        )
+
+    def _path_cb(self, name: str, msg: NavPath):
+        state = self._robots[name]
+        state.waypoints = [
+            (pose.pose.position.x, pose.pose.position.y)
+            for pose in msg.poses
+        ]
+        state.waypoint_index = 0
+        if len(state.waypoints) == 0:
+            state.goal_active = False
+            state.goal_reached = True
+            self._status_pubs[name].publish(Bool(data=True))
+            self.get_logger().warn(f"{name}: empty path received, ignoring")
+            return
+        state.goal_active = True
+        state.goal_reached = False
+        self._status_pubs[name].publish(Bool(data=False))
+        self.get_logger().info(
+            f"{name}: new path with {len(state.waypoints)} waypoints"
         )
 
     def _too_close(self, name: str) -> bool:
@@ -133,21 +160,30 @@ class FleetController(Node):
                 )
                 continue
 
-            # compute distance to goal
-            dx = state.goal_x - state.x
-            dy = state.goal_y - state.y
+            # current waypoint is at waypoint_index
+            wp_x, wp_y = state.waypoints[state.waypoint_index]
+            dx = wp_x - state.x
+            dy = wp_y - state.y
             distance = math.hypot(dx, dy)
 
-            # if within tolerance stop robot and publish goal status
+            # if within tolerance, advance to next waypoint or finish
             if distance < self._goal_tolerance:
-                self._cmd_pubs[name].publish(Twist())
-                state.goal_reached = True
-                state.goal_active = False
-                self._status_pubs[name].publish(Bool(data=True))
-                self.get_logger().info(f"{name}: goal reached")
+                if state.waypoint_index >= len(state.waypoints) - 1:
+                    # final waypoint reached
+                    self._cmd_pubs[name].publish(Twist())
+                    state.goal_reached = True
+                    state.goal_active = False
+                    self._status_pubs[name].publish(Bool(data=True))
+                    self.get_logger().info(f"{name}: path complete")
+                else:
+                    state.waypoint_index += 1
+                    remaining = len(state.waypoints) - state.waypoint_index
+                    self.get_logger().info(
+                        f"{name}: waypoint reached, {remaining} remaining"
+                    )
                 continue
 
-            # otherwise compute angle and heading error to face goal
+            # compute angle and heading error to face current waypoint
             target_yaw = math.atan2(dy, dx)
             yaw_error = _normalize_angle(target_yaw - state.yaw)
 

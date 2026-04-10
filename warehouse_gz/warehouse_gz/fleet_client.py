@@ -21,7 +21,7 @@ from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, Path as NavPath
 from std_msgs.msg import Bool
 from ament_index_python.packages import get_package_share_directory
 
@@ -84,6 +84,7 @@ class FleetClient:
         self._goal_reached: Dict[str, bool] = {}
         self._goal_events: Dict[str, threading.Event] = {}
         self._goal_pubs: Dict[str, rclpy.publisher.Publisher] = {}
+        self._path_pubs: Dict[str, rclpy.publisher.Publisher] = {}
 
         for name in self._names:
             self._goal_reached[name] = False
@@ -103,6 +104,9 @@ class FleetClient:
             )
             self._goal_pubs[name] = self._node.create_publisher(
                 PoseStamped, f"/{name}/goal_pose", 10
+            )
+            self._path_pubs[name] = self._node.create_publisher(
+                NavPath, f"/{name}/goal_path", 10
             )
 
         self._executor = SingleThreadedExecutor()
@@ -143,6 +147,30 @@ class FleetClient:
         msg.pose.orientation.w = 1.0
         self._goal_pubs[robot_name].publish(msg)
 
+    def send_path(self, robot_name: str, waypoints: List[Tuple[float, float]]) -> None:
+        """Send a multi-waypoint path to a robot in world coordinates.
+
+        The robot will drive through each waypoint in order and only
+        report goal_reached when the final waypoint is reached.
+        An empty list is treated as a no-op (goal_reached fires immediately).
+        """
+        if robot_name not in self._path_pubs:
+            raise ValueError(f"Unknown robot: {robot_name}")
+        with self._lock:
+            self._goal_reached[robot_name] = False
+        self._goal_events[robot_name].clear()
+
+        msg = NavPath()
+        msg.header.frame_id = "world"
+        for x, y in waypoints:
+            pose = PoseStamped()
+            pose.header.frame_id = "world"
+            pose.pose.position.x = float(x)
+            pose.pose.position.y = float(y)
+            pose.pose.orientation.w = 1.0
+            msg.poses.append(pose)
+        self._path_pubs[robot_name].publish(msg)
+
     def get_position(self, robot_name: str) -> Tuple[float, float, float]:
         """Return ``(x, y, yaw)`` for a robot.  Raises if no odom received yet."""
         with self._lock:
@@ -172,6 +200,17 @@ class FleetClient:
     def send_grid_goal(self, robot_name: str, row: int, col: int) -> None:
         position = grid_cell_to_world_center(row, col, self._origin, self._resolution, self._map_height)
         self.send_goal(robot_name, position[0], position[1])
+
+    def send_grid_path(self, robot_name: str, grid_waypoints: List[Tuple[int, int]]) -> None:
+        """Send a path as grid coordinates (row, col pairs).
+
+        Each (row, col) is converted to world coordinates before sending.
+        """
+        world_waypoints = [
+            grid_cell_to_world_center(row, col, self._origin, self._resolution, self._map_height)
+            for row, col in grid_waypoints
+        ]
+        self.send_path(robot_name, world_waypoints)
 
     def get_grid_position(self, robot_name: str) -> Tuple[int, int]:
         position = self.get_position(robot_name)
