@@ -125,10 +125,12 @@ class FleetClient:
 
         self._tasks: Dict[str, Task] = {}
         self._task_lock = threading.Lock()
+        self._robot_task: Dict[str, Optional[str]] = {}
 
         for name in self._names:
             self._goal_reached[name] = False
             self._goal_events[name] = threading.Event()
+            self._robot_task[name] = None
 
             self._node.create_subscription(
                 Odometry,
@@ -322,24 +324,57 @@ class FleetClient:
             world_y=world_y,
         )
 
+        # Insert into dict BEFORE spawning marker to prevent race condition
+        # where two concurrent create_task calls with the same ID both spawn
+        # markers before either checks for duplicates.
+        with self._task_lock:
+            if task_id in self._tasks:
+                raise ValueError(f"Task '{task_id}' already exists")
+            self._tasks[task_id] = task
+
         if GazeboMarkerManager.spawn_marker(task_id, world_x, world_y):
-            task.marker_spawned = True
+            with self._task_lock:
+                task.marker_spawned = True
         else:
             self._node.get_logger().warn(
                 f"Could not spawn Gazebo marker for task '{task_id}' "
                 f"-- task still usable, just not visible"
             )
 
-        with self._task_lock:
-            if task_id in self._tasks:
-                raise ValueError(f"Task '{task_id}' already exists")
-            self._tasks[task_id] = task
-
         self._node.get_logger().info(
             f"Created task '{task_id}' at grid ({row},{col}) "
             f"world ({world_x:.2f},{world_y:.2f}), dwell={dwell_time}s"
         )
         return task
+
+    def _wait_for_goal_or_cancel(
+        self,
+        robot_name: str,
+        cancel_event: threading.Event,
+        timeout: float,
+    ) -> bool:
+        """Wait for goal reached OR cancellation, whichever comes first.
+
+        Returns True if goal reached, False if timeout or cancelled.
+        """
+        deadline = time.monotonic() + timeout
+        goal_event = self._goal_events[robot_name]
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            if goal_event.wait(timeout=min(0.1, remaining)):
+                return True
+            if cancel_event.is_set():
+                return False
+
+    def _stop_robot(self, robot_name: str) -> None:
+        """Stop a robot by sending a goal at its current position."""
+        try:
+            pos = self.get_position(robot_name)
+            self.send_goal(robot_name, pos[0], pos[1])
+        except RuntimeError:
+            pass  # no odom yet, robot will keep moving
 
     def execute_task(
         self,
@@ -351,11 +386,13 @@ class FleetClient:
 
         Lifecycle: PENDING -> ASSIGNED -> (navigate) -> IN_PROGRESS -> (dwell)
         -> COMPLETED.  On navigation timeout: ASSIGNED -> FAILED (marker stays).
+        On cancellation (via remove_task): -> CANCELLED.
 
-        Returns True if task completed, False if failed.
+        Returns True if task completed, False if failed or cancelled.
 
         Raises:
-            ValueError: If robot_name or task_id is unknown, or task is not PENDING.
+            ValueError: If robot_name or task_id is unknown, task is not
+                PENDING, or the robot is already busy.
         """
         if robot_name not in self._goal_pubs:
             raise ValueError(f"Unknown robot: {robot_name}")
@@ -368,47 +405,91 @@ class FleetClient:
                 raise ValueError(
                     f"Task '{task_id}' is {task.status.value}, expected pending"
                 )
+            if self._robot_task.get(robot_name) is not None:
+                raise ValueError(
+                    f"Robot '{robot_name}' is busy with task "
+                    f"'{self._robot_task[robot_name]}'"
+                )
             task.status = TaskStatus.ASSIGNED
             task.assigned_robot = robot_name
+            self._robot_task[robot_name] = task_id
+            cancel_event = task.cancel_event
 
-        self.send_grid_goal(robot_name, task.row, task.col)
-        self._node.get_logger().info(
-            f"{robot_name}: navigating to task '{task_id}' at ({task.row},{task.col})"
-        )
-
-        reached = self.wait_for_goal(robot_name, timeout=nav_timeout)
-
-        if not reached:
-            with self._task_lock:
-                task.status = TaskStatus.FAILED
-            self._node.get_logger().warn(
-                f"{robot_name}: FAILED task '{task_id}' -- navigation timeout "
-                f"after {nav_timeout}s (marker stays visible)"
+        try:
+            # Navigation phase
+            self.send_grid_goal(robot_name, task.row, task.col)
+            self._node.get_logger().info(
+                f"{robot_name}: navigating to task '{task_id}' "
+                f"at ({task.row},{task.col})"
             )
-            return False
 
-        with self._task_lock:
-            task.status = TaskStatus.IN_PROGRESS
-        self._node.get_logger().info(
-            f"{robot_name}: arrived at task '{task_id}', dwelling for {task.dwell_time}s"
-        )
+            reached = self._wait_for_goal_or_cancel(
+                robot_name, cancel_event, nav_timeout
+            )
 
-        if task.dwell_time > 0:
-            time.sleep(task.dwell_time)
-
-        with self._task_lock:
-            task.status = TaskStatus.COMPLETED
-
-        if task.marker_spawned:
-            if GazeboMarkerManager.remove_marker(task_id):
-                task.marker_spawned = False
-            else:
-                self._node.get_logger().warn(
-                    f"Could not remove Gazebo marker for task '{task_id}'"
+            if cancel_event.is_set():
+                task.status = TaskStatus.CANCELLED
+                self._stop_robot(robot_name)
+                self._node.get_logger().info(
+                    f"{robot_name}: CANCELLED task '{task_id}' during navigation"
                 )
+                return False
 
-        self._node.get_logger().info(f"{robot_name}: COMPLETED task '{task_id}'")
-        return True
+            if not reached:
+                task.status = TaskStatus.FAILED
+                self._node.get_logger().warn(
+                    f"{robot_name}: FAILED task '{task_id}' -- navigation "
+                    f"timeout after {nav_timeout}s (marker stays visible)"
+                )
+                return False
+
+            # Dwell phase
+            with self._task_lock:
+                if cancel_event.is_set():
+                    task.status = TaskStatus.CANCELLED
+                    self._node.get_logger().info(
+                        f"{robot_name}: CANCELLED task '{task_id}' before dwell"
+                    )
+                    return False
+                task.status = TaskStatus.IN_PROGRESS
+
+            self._node.get_logger().info(
+                f"{robot_name}: arrived at task '{task_id}', "
+                f"dwelling for {task.dwell_time}s"
+            )
+
+            if task.dwell_time > 0:
+                cancelled = cancel_event.wait(timeout=task.dwell_time)
+                if cancelled:
+                    task.status = TaskStatus.CANCELLED
+                    self._node.get_logger().info(
+                        f"{robot_name}: CANCELLED task '{task_id}' during dwell"
+                    )
+                    return False
+
+            # Completion
+            with self._task_lock:
+                if cancel_event.is_set():
+                    task.status = TaskStatus.CANCELLED
+                    return False
+                task.status = TaskStatus.COMPLETED
+
+            if task.marker_spawned:
+                if GazeboMarkerManager.remove_marker(task_id):
+                    task.marker_spawned = False
+                else:
+                    self._node.get_logger().warn(
+                        f"Could not remove Gazebo marker for task '{task_id}'"
+                    )
+
+            self._node.get_logger().info(
+                f"{robot_name}: COMPLETED task '{task_id}'"
+            )
+            return True
+        finally:
+            with self._task_lock:
+                if self._robot_task.get(robot_name) == task_id:
+                    self._robot_task[robot_name] = None
 
     def execute_task_plan(
         self,
@@ -433,7 +514,8 @@ class FleetClient:
             success = self.execute_task(robot_name, task_id, nav_timeout)
             elapsed = time.monotonic() - start
             with self._task_lock:
-                dwell = self._tasks[task_id].dwell_time if success else 0
+                task_obj = self._tasks.get(task_id)
+                dwell = task_obj.dwell_time if (task_obj and success) else 0.0
             pos = self.get_position(robot_name)
             return TaskResults(
                 task_id=task_id,
@@ -475,14 +557,32 @@ class FleetClient:
             return [copy.copy(t) for t in self._tasks.values() if t.status == status]
 
     def remove_task(self, task_id: str) -> None:
-        """Remove a task and its Gazebo marker if present."""
+        """Remove a task and its Gazebo marker.  If in-progress, cancels first."""
         with self._task_lock:
             if task_id not in self._tasks:
                 raise ValueError(f"Unknown task: {task_id}")
             task = self._tasks.pop(task_id)
+            task.cancel_event.set()
+            if (
+                task.assigned_robot
+                and self._robot_task.get(task.assigned_robot) == task_id
+            ):
+                self._robot_task[task.assigned_robot] = None
 
         if task.marker_spawned:
             GazeboMarkerManager.remove_marker(task_id)
+
+    def clear_finished_tasks(self) -> int:
+        """Remove all COMPLETED, FAILED, and CANCELLED tasks.  Returns count."""
+        terminal = {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}
+        with self._task_lock:
+            to_remove = [t for t in self._tasks.values() if t.status in terminal]
+            for task in to_remove:
+                del self._tasks[task.task_id]
+        for task in to_remove:
+            if task.marker_spawned:
+                GazeboMarkerManager.remove_marker(task.task_id)
+        return len(to_remove)
 
     # ---- lifecycle ----
 
@@ -490,6 +590,7 @@ class FleetClient:
         """Stop the background spin thread and clean up."""
         with self._task_lock:
             for task in self._tasks.values():
+                task.cancel_event.set()
                 if task.marker_spawned:
                     GazeboMarkerManager.remove_marker(task.task_id)
                     task.marker_spawned = False
