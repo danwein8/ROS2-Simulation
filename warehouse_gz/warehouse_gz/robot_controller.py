@@ -11,7 +11,7 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Odometry, Path as RosPath
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from ament_index_python.packages import get_package_share_directory
 
 
@@ -65,50 +65,116 @@ class FleetController(Node):
         self._robots: dict[str, RobotState] = {}
         self._cmd_pubs: dict[str, rclpy.publisher.Publisher] = {}
         self._status_pubs: dict[str, rclpy.publisher.Publisher] = {}
+        self._odom_subs: dict[str, rclpy.subscription.Subscription] = {}
+        self._path_subs: dict[str, rclpy.subscription.Subscription] = {}
 
-        # must create these subs and pubs for each robot
         for i in range(robot_count):
             name = f"robot_{i:02d}"
-            self._robots[name] = RobotState()
+            self._add_robot(name)
 
-            # get from Gazebo
-            self.create_subscription(
-                Odometry,
-                f"/{name}/odom",
-                lambda msg, n=name: self._odom_cb(n, msg),
-                10,
-            )
-            # Path subscription
-            self.create_subscription(
-                RosPath,
-                f"/{name}/goal_path",
-                lambda msg, n=name: self._path_cb(n, msg),
-                10,
-            )
-
-            # to Gazebo
-            self._cmd_pubs[name] = self.create_publisher(Twist, f"/{name}/cmd_vel", 10)
-            # to FleetClient
-            self._status_pubs[name] = self.create_publisher(Bool, f"/{name}/goal_status", 10)
+        # Listen for dynamic robot add/remove from FleetClient
+        self.create_subscription(
+            String, "/fleet_controller/robot_add",
+            self._on_robot_add, 10,
+        )
+        self.create_subscription(
+            String, "/fleet_controller/robot_remove",
+            self._on_robot_remove, 10,
+        )
 
         self.create_timer(0.05, self._control_loop)  # 20 Hz
         self.get_logger().info(
             f"Fleet controller started for {robot_count} robots"
         )
 
+    # ---- dynamic robot management ----
+
+    def _add_robot(self, name: str) -> None:
+        """Wire up subs/pubs/state for a single robot."""
+        if name in self._robots:
+            self.get_logger().warn(f"Robot '{name}' already registered")
+            return
+
+        self._robots[name] = RobotState()
+
+        self._odom_subs[name] = self.create_subscription(
+            Odometry,
+            f"/{name}/odom",
+            lambda msg, n=name: self._odom_cb(n, msg),
+            10,
+        )
+        self._path_subs[name] = self.create_subscription(
+            RosPath,
+            f"/{name}/goal_path",
+            lambda msg, n=name: self._path_cb(n, msg),
+            10,
+        )
+
+        self._cmd_pubs[name] = self.create_publisher(
+            Twist, f"/{name}/cmd_vel", 10
+        )
+        self._status_pubs[name] = self.create_publisher(
+            Bool, f"/{name}/goal_status", 10
+        )
+
+    def _remove_robot(self, name: str) -> None:
+        """Tear down subs/pubs/state for a single robot."""
+        if name not in self._robots:
+            self.get_logger().warn(f"Robot '{name}' not registered")
+            return
+
+        # Stop the robot before tearing down
+        self._cmd_pubs[name].publish(Twist())
+
+        sub = self._odom_subs.pop(name, None)
+        if sub:
+            self.destroy_subscription(sub)
+        sub = self._path_subs.pop(name, None)
+        if sub:
+            self.destroy_subscription(sub)
+
+        pub = self._cmd_pubs.pop(name, None)
+        if pub:
+            self.destroy_publisher(pub)
+        pub = self._status_pubs.pop(name, None)
+        if pub:
+            self.destroy_publisher(pub)
+
+        del self._robots[name]
+        self.get_logger().info(f"Removed robot '{name}' from controller")
+
+    def _on_robot_add(self, msg: String) -> None:
+        name = msg.data.strip()
+        if name:
+            self.get_logger().info(f"Dynamic add: '{name}'")
+            self._add_robot(name)
+
+    def _on_robot_remove(self, msg: String) -> None:
+        name = msg.data.strip()
+        if name:
+            self.get_logger().info(f"Dynamic remove: '{name}'")
+            self._remove_robot(name)
+
+    # ---- callbacks ----
+
     def _odom_cb(self, name: str, msg: Odometry):
-        state = self._robots[name]
+        state = self._robots.get(name)
+        if state is None:
+            return
         state.x = msg.pose.pose.position.x
         state.y = msg.pose.pose.position.y
         state.yaw = _yaw_from_quat(msg.pose.pose.orientation)
-    
+
     def _path_cb(self, name: str, msg: RosPath):
-        state = self._robots[name]
+        state = self._robots.get(name)
+        if state is None:
+            return
         state.waypoint_queue = deque((pose.pose.position.x, pose.pose.position.y) for pose in msg.poses)
         state.waypoint_index = 0
         state.goal_active = True
         state.goal_reached = False
-        self._status_pubs[name].publish(Bool(data=False))
+        if name in self._status_pubs:
+            self._status_pubs[name].publish(Bool(data=False))
         self.get_logger().info(f"{name}: received path with {len(msg.poses)} waypoints")
 
 
@@ -122,7 +188,8 @@ class FleetController(Node):
         return False
 
     def _control_loop(self):
-        for name, state in self._robots.items():
+        # Snapshot to allow dict mutation from add/remove callbacks
+        for name, state in list(self._robots.items()):
             if not state.goal_active or state.goal_reached:
                 continue
 
