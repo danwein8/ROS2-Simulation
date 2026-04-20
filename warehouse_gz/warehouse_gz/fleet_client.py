@@ -10,8 +10,11 @@ Usage::
         reached = fleet.wait_for_goal("robot_00", timeout=30.0)
 """
 
+import concurrent.futures
+import copy
 import math
 import threading
+import time
 import yaml
 import json
 import datetime
@@ -34,11 +37,14 @@ from ament_index_python.packages import get_package_share_directory
 try:
     from warehouse_gz.map_utils import (
         grid_cell_to_world_center,
+        is_blocked_char,
         world_to_grid_cell,
-        parse_octile_map
+        parse_octile_map,
     )
+    from warehouse_gz.task import Task, TaskStatus, GazeboMarkerManager
 except ImportError:
-    from map_utils import grid_cell_to_world_center, world_to_grid_cell, parse_octile_map
+    from map_utils import grid_cell_to_world_center, is_blocked_char, world_to_grid_cell, parse_octile_map
+    from task import Task, TaskStatus, GazeboMarkerManager
 
 
 def _yaw_from_quat(q) -> float:
@@ -59,6 +65,17 @@ class Results:
     completion_time: Dict[str, timedelta] = field(default_factory=dict)
     # how far from goal robot ended
     position_error: Dict[str, Tuple[float, float]] = field(default_factory=dict)
+
+
+@dataclass
+class TaskResults:
+    task_id: str
+    robot_name: str
+    success: bool
+    nav_time: float
+    dwell_time: float
+    total_time: float
+    final_position: Optional[Tuple[float, float, float]] = None
 
 
 class FleetClient:
@@ -105,6 +122,9 @@ class FleetClient:
         self._goal_reached: Dict[str, bool] = {}
         self._goal_events: Dict[str, threading.Event] = {}
         self._goal_pubs: Dict[str, rclpy.publisher.Publisher] = {}
+
+        self._tasks: Dict[str, Task] = {}
+        self._task_lock = threading.Lock()
 
         for name in self._names:
             self._goal_reached[name] = False
@@ -257,10 +277,223 @@ class FleetClient:
             data = json.load(file)
             return self.execute_plan(data)
 
+    # ---- task API ----
+
+    def _validate_task_location(self, row: int, col: int) -> None:
+        """Raise ValueError if (row, col) is out of bounds or on a blocked cell."""
+        if row < 0 or row >= self._map_height or col < 0 or col >= self._map_width:
+            raise ValueError(
+                f"Task location ({row}, {col}) is out of map bounds "
+                f"(0..{self._map_height - 1}, 0..{self._map_width - 1})"
+            )
+        if is_blocked_char(self._rows[row][col]):
+            raise ValueError(
+                f"Task location ({row}, {col}) is on a blocked cell "
+                f"(char='{self._rows[row][col]}')"
+            )
+
+    def create_task(
+        self,
+        task_id: str,
+        row: int,
+        col: int,
+        dwell_time: float = 5.0,
+    ) -> Task:
+        """Create a task at a grid location and spawn its visual marker in Gazebo.
+
+        Raises:
+            ValueError: If task_id already exists, location is blocked, or out of bounds.
+        """
+        if dwell_time < 0:
+            raise ValueError(f"dwell_time must be >= 0, got {dwell_time}")
+
+        self._validate_task_location(row, col)
+
+        world_x, world_y = grid_cell_to_world_center(
+            row, col, self._origin, self._resolution, self._map_height
+        )
+
+        task = Task(
+            task_id=task_id,
+            row=row,
+            col=col,
+            dwell_time=dwell_time,
+            world_x=world_x,
+            world_y=world_y,
+        )
+
+        if GazeboMarkerManager.spawn_marker(task_id, world_x, world_y):
+            task.marker_spawned = True
+        else:
+            self._node.get_logger().warn(
+                f"Could not spawn Gazebo marker for task '{task_id}' "
+                f"-- task still usable, just not visible"
+            )
+
+        with self._task_lock:
+            if task_id in self._tasks:
+                raise ValueError(f"Task '{task_id}' already exists")
+            self._tasks[task_id] = task
+
+        self._node.get_logger().info(
+            f"Created task '{task_id}' at grid ({row},{col}) "
+            f"world ({world_x:.2f},{world_y:.2f}), dwell={dwell_time}s"
+        )
+        return task
+
+    def execute_task(
+        self,
+        robot_name: str,
+        task_id: str,
+        nav_timeout: float = 30.0,
+    ) -> bool:
+        """Send a robot to a task, dwell, and mark complete.
+
+        Lifecycle: PENDING -> ASSIGNED -> (navigate) -> IN_PROGRESS -> (dwell)
+        -> COMPLETED.  On navigation timeout: ASSIGNED -> FAILED (marker stays).
+
+        Returns True if task completed, False if failed.
+
+        Raises:
+            ValueError: If robot_name or task_id is unknown, or task is not PENDING.
+        """
+        if robot_name not in self._goal_pubs:
+            raise ValueError(f"Unknown robot: {robot_name}")
+
+        with self._task_lock:
+            if task_id not in self._tasks:
+                raise ValueError(f"Unknown task: {task_id}")
+            task = self._tasks[task_id]
+            if task.status != TaskStatus.PENDING:
+                raise ValueError(
+                    f"Task '{task_id}' is {task.status.value}, expected pending"
+                )
+            task.status = TaskStatus.ASSIGNED
+            task.assigned_robot = robot_name
+
+        self.send_grid_goal(robot_name, task.row, task.col)
+        self._node.get_logger().info(
+            f"{robot_name}: navigating to task '{task_id}' at ({task.row},{task.col})"
+        )
+
+        reached = self.wait_for_goal(robot_name, timeout=nav_timeout)
+
+        if not reached:
+            with self._task_lock:
+                task.status = TaskStatus.FAILED
+            self._node.get_logger().warn(
+                f"{robot_name}: FAILED task '{task_id}' -- navigation timeout "
+                f"after {nav_timeout}s (marker stays visible)"
+            )
+            return False
+
+        with self._task_lock:
+            task.status = TaskStatus.IN_PROGRESS
+        self._node.get_logger().info(
+            f"{robot_name}: arrived at task '{task_id}', dwelling for {task.dwell_time}s"
+        )
+
+        if task.dwell_time > 0:
+            time.sleep(task.dwell_time)
+
+        with self._task_lock:
+            task.status = TaskStatus.COMPLETED
+
+        if task.marker_spawned:
+            if GazeboMarkerManager.remove_marker(task_id):
+                task.marker_spawned = False
+            else:
+                self._node.get_logger().warn(
+                    f"Could not remove Gazebo marker for task '{task_id}'"
+                )
+
+        self._node.get_logger().info(f"{robot_name}: COMPLETED task '{task_id}'")
+        return True
+
+    def execute_task_plan(
+        self,
+        assignments: Dict[str, str],
+        nav_timeout: float = 30.0,
+    ) -> List[TaskResults]:
+        """Execute a batch of robot-task assignments in parallel.
+
+        Args:
+            assignments: ``{robot_name: task_id}`` mapping.
+            nav_timeout: Max seconds for each navigation.
+
+        All robots navigate simultaneously.  Blocks until all complete or fail.
+        """
+        if not assignments:
+            return []
+
+        results: List[TaskResults] = []
+
+        def _run_one(robot_name: str, task_id: str) -> TaskResults:
+            start = time.monotonic()
+            success = self.execute_task(robot_name, task_id, nav_timeout)
+            elapsed = time.monotonic() - start
+            with self._task_lock:
+                dwell = self._tasks[task_id].dwell_time if success else 0
+            pos = self.get_position(robot_name)
+            return TaskResults(
+                task_id=task_id,
+                robot_name=robot_name,
+                success=success,
+                nav_time=elapsed - dwell,
+                dwell_time=dwell,
+                total_time=elapsed,
+                final_position=pos,
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=len(assignments)
+        ) as pool:
+            futures = {
+                pool.submit(_run_one, robot, task): (robot, task)
+                for robot, task in assignments.items()
+            }
+            for future in concurrent.futures.as_completed(futures):
+                results.append(future.result())
+
+        return results
+
+    def get_task(self, task_id: str) -> Task:
+        """Return a copy of the task by ID."""
+        with self._task_lock:
+            if task_id not in self._tasks:
+                raise ValueError(f"Unknown task: {task_id}")
+            return copy.copy(self._tasks[task_id])
+
+    def get_all_tasks(self) -> Dict[str, Task]:
+        """Return a snapshot (copies) of all tasks."""
+        with self._task_lock:
+            return {k: copy.copy(v) for k, v in self._tasks.items()}
+
+    def get_tasks_by_status(self, status: TaskStatus) -> List[Task]:
+        """Return copies of tasks matching a given status."""
+        with self._task_lock:
+            return [copy.copy(t) for t in self._tasks.values() if t.status == status]
+
+    def remove_task(self, task_id: str) -> None:
+        """Remove a task and its Gazebo marker if present."""
+        with self._task_lock:
+            if task_id not in self._tasks:
+                raise ValueError(f"Unknown task: {task_id}")
+            task = self._tasks.pop(task_id)
+
+        if task.marker_spawned:
+            GazeboMarkerManager.remove_marker(task_id)
+
     # ---- lifecycle ----
 
     def shutdown(self) -> None:
         """Stop the background spin thread and clean up."""
+        with self._task_lock:
+            for task in self._tasks.values():
+                if task.marker_spawned:
+                    GazeboMarkerManager.remove_marker(task.task_id)
+                    task.marker_spawned = False
+
         self._executor.shutdown()
         self._node.destroy_node()
         rclpy.try_shutdown()
