@@ -31,7 +31,7 @@ from rclpy.node import Node
 from rclpy.parameter import Parameter
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry, Path as RosPath
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from ament_index_python.packages import get_package_share_directory
 
 try:
@@ -42,9 +42,11 @@ try:
         parse_octile_map,
     )
     from warehouse_gz.task import Task, TaskStatus, GazeboMarkerManager
+    from warehouse_gz.robot_spawn import GazeboRobotManager, RobotProcessManager
 except ImportError:
     from map_utils import grid_cell_to_world_center, is_blocked_char, world_to_grid_cell, parse_octile_map
     from task import Task, TaskStatus, GazeboMarkerManager
+    from robot_spawn import GazeboRobotManager, RobotProcessManager
 
 
 def _yaw_from_quat(q) -> float:
@@ -122,34 +124,26 @@ class FleetClient:
         self._goal_reached: Dict[str, bool] = {}
         self._goal_events: Dict[str, threading.Event] = {}
         self._goal_pubs: Dict[str, rclpy.publisher.Publisher] = {}
+        self._odom_subs: Dict[str, rclpy.subscription.Subscription] = {}
+        self._status_subs: Dict[str, rclpy.subscription.Subscription] = {}
 
         self._tasks: Dict[str, Task] = {}
         self._task_lock = threading.Lock()
         self._robot_task: Dict[str, Optional[str]] = {}
 
-        for name in self._names:
-            self._goal_reached[name] = False
-            self._goal_events[name] = threading.Event()
-            self._robot_task[name] = None
+        # Dynamic robot management
+        self._robot_lock = threading.Lock()
+        self._robot_process_mgr = RobotProcessManager()
+        self._dynamic_robots: set = set()
+        self._robot_add_pub = self._node.create_publisher(
+            String, "/fleet_controller/robot_add", 10
+        )
+        self._robot_remove_pub = self._node.create_publisher(
+            String, "/fleet_controller/robot_remove", 10
+        )
 
-            self._node.create_subscription(
-                Odometry,
-                f"/{name}/odom",
-                lambda msg, n=name: self._odom_cb(n, msg),
-                10,
-            )
-            self._node.create_subscription(
-                Bool,
-                f"/{name}/goal_status",
-                lambda msg, n=name: self._status_cb(n, msg),
-                10,
-            )
-            # self._goal_pubs[name] = self._node.create_publisher(
-            #     PoseStamped, f"/{name}/goal_pose", 10
-            # )
-            self._goal_pubs[name] = self._node.create_publisher(
-                RosPath, f"/{name}/goal_path", 10
-            )
+        for name in self._names:
+            self._wire_robot(name)
 
         self._executor = SingleThreadedExecutor()
         self._executor.add_node(self._node)
@@ -157,6 +151,154 @@ class FleetClient:
             target=self._executor.spin, daemon=True
         )
         self._spin_thread.start()
+
+    # ---- per-robot wiring ----
+
+    def _wire_robot(self, name: str) -> None:
+        """Create ROS subs/pub and internal state for a single robot."""
+        self._goal_reached[name] = False
+        self._goal_events[name] = threading.Event()
+        self._robot_task[name] = None
+
+        self._odom_subs[name] = self._node.create_subscription(
+            Odometry,
+            f"/{name}/odom",
+            lambda msg, n=name: self._odom_cb(n, msg),
+            10,
+        )
+        self._status_subs[name] = self._node.create_subscription(
+            Bool,
+            f"/{name}/goal_status",
+            lambda msg, n=name: self._status_cb(n, msg),
+            10,
+        )
+        self._goal_pubs[name] = self._node.create_publisher(
+            RosPath, f"/{name}/goal_path", 10
+        )
+
+    def _unwire_robot(self, name: str) -> None:
+        """Destroy ROS subs/pub and internal state for a single robot."""
+        sub = self._odom_subs.pop(name, None)
+        if sub:
+            self._node.destroy_subscription(sub)
+        sub = self._status_subs.pop(name, None)
+        if sub:
+            self._node.destroy_subscription(sub)
+        pub = self._goal_pubs.pop(name, None)
+        if pub:
+            self._node.destroy_publisher(pub)
+
+        with self._lock:
+            self._positions.pop(name, None)
+            self._goal_reached.pop(name, None)
+            self._goal_events.pop(name, None)
+        with self._task_lock:
+            self._robot_task.pop(name, None)
+
+    # ---- dynamic robot add/remove ----
+
+    def add_robot(self, name: str, row: int, col: int) -> None:
+        """Spawn a new robot at a grid location and wire it up.
+
+        Creates the Gazebo entity, starts bridge/state_publisher subprocesses,
+        wires FleetClient subs/pubs, and notifies the FleetController.
+
+        Raises:
+            ValueError: If name already exists or location is invalid.
+            RuntimeError: If Gazebo spawn fails or odom doesn't arrive.
+        """
+        with self._robot_lock:
+            if name in self._names:
+                raise ValueError(f"Robot '{name}' already exists")
+
+        self._validate_task_location(row, col)
+
+        world_x, world_y = grid_cell_to_world_center(
+            row, col, self._origin, self._resolution, self._map_height
+        )
+
+        # 1. Spawn Gazebo entity
+        if not GazeboRobotManager.spawn_robot(name, world_x, world_y):
+            raise RuntimeError(f"Failed to spawn Gazebo entity for '{name}'")
+
+        # Brief pause to let Gazebo register the model and start publishing topics
+        time.sleep(2.0)
+
+        # 2. Start bridge + state_publisher subprocesses
+        robot_xml = GazeboRobotManager.process_xacro(name)
+        try:
+            self._robot_process_mgr.start(name, robot_xml)
+        except Exception:
+            GazeboRobotManager.remove_robot(name)
+            raise
+
+        # 3. Wire FleetClient subs/pubs
+        self._wire_robot(name)
+
+        # 4. Notify FleetController
+        self._robot_add_pub.publish(String(data=name))
+
+        # 5. Wait for first odom so the robot is confirmed alive
+        deadline = time.monotonic() + 20.0
+        while time.monotonic() < deadline:
+            with self._lock:
+                if name in self._positions:
+                    break
+            time.sleep(0.2)
+        else:
+            self._node.get_logger().warn(
+                f"No odom received for '{name}' within 20s — "
+                f"robot may not be ready yet"
+            )
+
+        with self._robot_lock:
+            self._names.append(name)
+            self._dynamic_robots.add(name)
+
+        self._node.get_logger().info(
+            f"Added robot '{name}' at grid ({row},{col}) "
+            f"world ({world_x:.2f},{world_y:.2f})"
+        )
+
+    def remove_robot(self, name: str) -> None:
+        """Remove a robot from the simulation and tear down all state.
+
+        Cancels any in-progress task, notifies FleetController, kills
+        subprocesses, and removes the Gazebo entity.
+
+        Raises:
+            ValueError: If robot name is unknown.
+        """
+        with self._robot_lock:
+            if name not in self._names:
+                raise ValueError(f"Unknown robot: {name}")
+
+        # 1. Cancel any active task on this robot
+        with self._task_lock:
+            active_task_id = self._robot_task.get(name)
+            if active_task_id and active_task_id in self._tasks:
+                self._tasks[active_task_id].cancel_event.set()
+
+        time.sleep(0.2)  # let task thread observe cancel
+
+        # 2. Notify FleetController to stop controlling this robot
+        self._robot_remove_pub.publish(String(data=name))
+
+        # 3. Tear down FleetClient ROS resources
+        self._unwire_robot(name)
+
+        # 4. Kill bridge + state_publisher subprocesses (if dynamic)
+        self._robot_process_mgr.stop(name)
+
+        # 5. Remove Gazebo entity
+        GazeboRobotManager.remove_robot(name)
+
+        with self._robot_lock:
+            if name in self._names:
+                self._names.remove(name)
+            self._dynamic_robots.discard(name)
+
+        self._node.get_logger().info(f"Removed robot '{name}'")
 
     # ---- callbacks ----
 
@@ -234,36 +376,81 @@ class FleetClient:
         return world_to_grid_cell(position[0], position[1], self._origin, self._resolution, self._map_height, self._map_width)
     
     def execute_plan(self, plan: list[Dict]) -> List[Results]:
-        """plan should be a list of timesteps and each timestep is a dict mapping 
+        """Execute a plan, automatically adding/removing robots between timesteps.
+
+        plan should be a list of timesteps and each timestep is a dict mapping
         robot names to grid cells:
         plan = [
             {"robot_00":(3,4), "robot_01": (5,6)},
-            {"robot_00":(3,5), "robot_01": (5,7)}
-            ...
+            {"robot_00":(3,5)},                      # robot_01 removed
+            {"robot_00":(3,6), "robot_02": (1,1)},   # robot_02 added at (1,1)
         ]
+
+        If a robot appears in a timestep but wasn't in the previous one,
+        it is spawned at its grid location.  If a robot disappears, it is
+        removed from the simulation.
         """
         result_list = []
+        previous_robots: set = set(self._names)
+
         for i, timestep in enumerate(plan):
+            current_robots = set(timestep.keys())
+
+            # Diff: robots that appeared or disappeared
+            added = current_robots - previous_robots
+            removed = previous_robots - current_robots
+
+            for name in removed:
+                self._node.get_logger().info(
+                    f"Timestep {i}: removing robot '{name}'"
+                )
+                try:
+                    self.remove_robot(name)
+                except (ValueError, RuntimeError) as e:
+                    self._node.get_logger().warn(
+                        f"Failed to remove robot '{name}': {e}"
+                    )
+
+            for name in added:
+                row, col = timestep[name]
+                self._node.get_logger().info(
+                    f"Timestep {i}: adding robot '{name}' at ({row},{col})"
+                )
+                try:
+                    self.add_robot(name, row, col)
+                except (ValueError, RuntimeError) as e:
+                    self._node.get_logger().warn(
+                        f"Failed to add robot '{name}': {e}"
+                    )
+
+            # Execute the timestep goals (only for robots present)
             start = datetime.datetime.now()
             res = Results(i, start, self._node.get_clock().now())
-            complete = {robot: True for robot in timestep}
-            completion_time = {r: 0.0 for r in timestep}
-            pos_error = {rb: 0.0 for rb in timestep}
-            for robot_name, (row, col) in timestep.items():
+            active = {k: v for k, v in timestep.items() if k in self._names}
+            complete = {robot: True for robot in active}
+            completion_time = {r: 0.0 for r in active}
+            pos_error = {rb: 0.0 for rb in active}
+            for robot_name, (row, col) in active.items():
                 self.send_grid_goal(robot_name, row, col)
             # wait for all robots to finish before next timestep
-            for robot_name, (row, col) in timestep.items():
+            for robot_name, (row, col) in active.items():
                 if not self.wait_for_goal(robot_name):
                     self._node.get_logger().info(f'Robot {robot_name} failed navigation at timestep {i}')
                     complete[robot_name] = False
                 completion_time[robot_name] = datetime.datetime.now() - start
-                curr_pos = self.get_position(robot_name)
-                desired_pos = grid_cell_to_world_center(row, col, self._origin, self._resolution, self._map_height)
-                pos_error[robot_name] = (curr_pos[0] - desired_pos[0], curr_pos[1] - desired_pos[1])
+                try:
+                    curr_pos = self.get_position(robot_name)
+                    desired_pos = grid_cell_to_world_center(row, col, self._origin, self._resolution, self._map_height)
+                    pos_error[robot_name] = (curr_pos[0] - desired_pos[0], curr_pos[1] - desired_pos[1])
+                except RuntimeError:
+                    pos_error[robot_name] = (float('inf'), float('inf'))
             res.complete = complete
             res.completion_time = completion_time
             res.position_error = pos_error
             result_list.append(res)
+
+            previous_robots = current_robots
+
         return result_list
 
     def load_plan_from_file(self, path: str) -> List[Results]:
@@ -588,12 +775,21 @@ class FleetClient:
 
     def shutdown(self) -> None:
         """Stop the background spin thread and clean up."""
+        # Cancel all in-flight tasks
         with self._task_lock:
             for task in self._tasks.values():
                 task.cancel_event.set()
                 if task.marker_spawned:
                     GazeboMarkerManager.remove_marker(task.task_id)
                     task.marker_spawned = False
+
+        # Remove dynamic robots (kills subprocesses + Gazebo entities)
+        for name in list(self._dynamic_robots):
+            try:
+                self.remove_robot(name)
+            except (ValueError, RuntimeError):
+                pass
+        self._robot_process_mgr.stop_all()
 
         self._executor.shutdown()
         self._node.destroy_node()

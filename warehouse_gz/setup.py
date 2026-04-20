@@ -41,6 +41,8 @@ setup(
     entry_points={
         'console_scripts': [
             'fleet_controller = warehouse_gz.robot_controller:main',
+            'demo_dynamic_tasks = warehouse_gz.demo_dynamic_tasks:main',
+            'demo_dynamic_robots = warehouse_gz.demo_dynamic_robots:main',
         ],
     },
 )
