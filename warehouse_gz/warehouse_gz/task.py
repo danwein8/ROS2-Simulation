@@ -4,7 +4,8 @@ import logging
 import os
 import subprocess
 import tempfile
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
@@ -17,6 +18,7 @@ class TaskStatus(Enum):
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 @dataclass
@@ -30,6 +32,7 @@ class Task:
     world_x: float = 0.0
     world_y: float = 0.0
     marker_spawned: bool = False
+    cancel_event: threading.Event = field(default_factory=threading.Event)
 
 
 class GazeboMarkerManager:
