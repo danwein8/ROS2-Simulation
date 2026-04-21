@@ -53,7 +53,7 @@ class FleetController(Node):
         self.declare_parameter("angular_speed", 1.0)
         self.declare_parameter("goal_tolerance", 0.15)
         self.declare_parameter("heading_tolerance", 0.1)
-        self.declare_parameter("collision_buffer", 0.001)
+        self.declare_parameter("collision_buffer", 0.0)
 
         robot_count = self.get_parameter("robot_count").value
         self._linear_speed = self.get_parameter("linear_speed").value
@@ -193,13 +193,14 @@ class FleetController(Node):
             if not state.goal_active or state.goal_reached:
                 continue
 
-            # if self._too_close(name):
-            #     self._cmd_pubs[name].publish(Twist())
-            #     self.get_logger().warn(
-            #         f"{name}: collision buffer stop",
-            #         throttle_duration_sec=2.0,
-            #     )
-            #     continue
+            # keep collision buffer logic with buffer of 0.0 in case we want it later
+            if self._too_close(name):
+                self._cmd_pubs[name].publish(Twist())
+                self.get_logger().warn(
+                    f"{name}: collision buffer stop",
+                    throttle_duration_sec=2.0,
+                )
+                continue
 
             # compute distance to goal
             goal_x, goal_y = state.waypoint_queue[state.waypoint_index]

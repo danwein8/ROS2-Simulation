@@ -85,6 +85,9 @@ class FleetClient:
 
     Manages rclpy lifecycle internally so the caller does not need any
     ROS2 knowledge.  A background daemon thread keeps the node spinning.
+
+    THERE ARE 3 LOCKS:
+    `_robot_lock` → `_task_lock` → `_lock` — always acquire outer first
     """
 
     def __init__(
@@ -130,6 +133,7 @@ class FleetClient:
         self._tasks: Dict[str, Task] = {}
         self._task_lock = threading.Lock()
         self._robot_task: Dict[str, Optional[str]] = {}
+        self._task_exited: Dict[str, threading.Event] = {}
 
         # Dynamic robot management
         self._robot_lock = threading.Lock()
@@ -159,6 +163,7 @@ class FleetClient:
         self._goal_reached[name] = False
         self._goal_events[name] = threading.Event()
         self._robot_task[name] = None
+        self._task_exited[name] = threading.Event()
 
         self._odom_subs[name] = self._node.create_subscription(
             Odometry,
@@ -194,6 +199,7 @@ class FleetClient:
             self._goal_events.pop(name, None)
         with self._task_lock:
             self._robot_task.pop(name, None)
+            self._task_exited.pop(name, None)
 
     # ---- dynamic robot add/remove ----
 
@@ -235,6 +241,10 @@ class FleetClient:
         # 3. Wire FleetClient subs/pubs
         self._wire_robot(name)
 
+        with self._robot_lock:
+            self._names.append(name)
+            self._dynamic_robots.add(name)
+
         # 4. Notify FleetController
         self._robot_add_pub.publish(String(data=name))
 
@@ -250,10 +260,6 @@ class FleetClient:
                 f"No odom received for '{name}' within 20s — "
                 f"robot may not be ready yet"
             )
-
-        with self._robot_lock:
-            self._names.append(name)
-            self._dynamic_robots.add(name)
 
         self._node.get_logger().info(
             f"Added robot '{name}' at grid ({row},{col}) "
@@ -278,8 +284,9 @@ class FleetClient:
             active_task_id = self._robot_task.get(name)
             if active_task_id and active_task_id in self._tasks:
                 self._tasks[active_task_id].cancel_event.set()
-
-        time.sleep(0.2)  # let task thread observe cancel
+            self._task_exited[name].wait(timeout=5.0)
+        
+        # time.sleep(0.2)  # let task thread observe cancel
 
         # 2. Notify FleetController to stop controlling this robot
         self._robot_remove_pub.publish(String(data=name))
@@ -375,6 +382,26 @@ class FleetClient:
         position = self.get_position(robot_name)
         return world_to_grid_cell(position[0], position[1], self._origin, self._resolution, self._map_height, self._map_width)
     
+    def paths_to_timesteps(
+            paths: Dict[str, List[Tuple[int, int]]]
+    ) -> List[Dict[str, Tuple[int, int]]]:
+        """convert {robot: [cells]} into [{robot: cell_at_t}, ...]
+        
+        Pads shorter paths by repeating the final cell so a robot that
+        finishes early just sits at its goal while others catch up
+        """
+        if not paths:
+            return []
+        max_len = max(len(p) for p in paths.values())
+        timesteps = []
+        for t in range(max_len):
+            step = {}
+            for robot, cells in paths.items():
+                step[robot] = cells[t] if t < len(cells) else cells[-1]
+            timesteps.append(step)
+        return timesteps
+
+
     def execute_plan(self, plan: list[Dict]) -> List[Results]:
         """Execute a plan, automatically adding/removing robots between timesteps.
 
@@ -428,7 +455,7 @@ class FleetClient:
             res = Results(i, start, self._node.get_clock().now())
             active = {k: v for k, v in timestep.items() if k in self._names}
             complete = {robot: True for robot in active}
-            completion_time = {r: 0.0 for r in active}
+            completion_time = default_factory=Dict
             pos_error = {rb: 0.0 for rb in active}
             for robot_name, (row, col) in active.items():
                 self.send_grid_goal(robot_name, row, col)
@@ -449,13 +476,14 @@ class FleetClient:
             res.position_error = pos_error
             result_list.append(res)
 
-            previous_robots = current_robots
+            previous_robots = set(name for name in current_robots if name in self._names)
 
         return result_list
 
     def load_plan_from_file(self, path: str) -> List[Results]:
         """For stored plans that external programs create and write.
         Path should be a json file that has the format to feed into execute_plan()
+        can be tuples or lists for coordinates
         plan = [
             {"robot_00":(3,4), "robot_01": (5,6)},
             {"robot_00":(3,5), "robot_01": (5,7)}
@@ -538,7 +566,7 @@ class FleetClient:
         self,
         robot_name: str,
         cancel_event: threading.Event,
-        timeout: float,
+        timeout: float = 10.0,
     ) -> bool:
         """Wait for goal reached OR cancellation, whichever comes first.
 
@@ -677,6 +705,7 @@ class FleetClient:
             with self._task_lock:
                 if self._robot_task.get(robot_name) == task_id:
                     self._robot_task[robot_name] = None
+                    self._task_exited[robot_name].set()
 
     def execute_task_plan(
         self,
@@ -703,7 +732,10 @@ class FleetClient:
             with self._task_lock:
                 task_obj = self._tasks.get(task_id)
                 dwell = task_obj.dwell_time if (task_obj and success) else 0.0
-            pos = self.get_position(robot_name)
+            try:
+                pos = self.get_position(robot_name)
+            except:
+                pos = None
             return TaskResults(
                 task_id=task_id,
                 robot_name=robot_name,
