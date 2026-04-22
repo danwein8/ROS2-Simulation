@@ -67,6 +67,7 @@ class Results:
     completion_time: Dict[str, timedelta] = field(default_factory=dict)
     # how far from goal robot ended
     position_error: Dict[str, Tuple[float, float]] = field(default_factory=dict)
+    dwelled: Dict[str, bool] = field(default_factory=dict)
 
 
 @dataclass
@@ -285,8 +286,6 @@ class FleetClient:
             if active_task_id and active_task_id in self._tasks:
                 self._tasks[active_task_id].cancel_event.set()
             self._task_exited[name].wait(timeout=5.0)
-        
-        # time.sleep(0.2)  # let task thread observe cancel
 
         # 2. Notify FleetController to stop controlling this robot
         self._robot_remove_pub.publish(String(data=name))
@@ -382,6 +381,7 @@ class FleetClient:
         position = self.get_position(robot_name)
         return world_to_grid_cell(position[0], position[1], self._origin, self._resolution, self._map_height, self._map_width)
     
+    @staticmethod
     def paths_to_timesteps(
             paths: Dict[str, List[Tuple[int, int]]]
     ) -> List[Dict[str, Tuple[int, int]]]:
@@ -401,6 +401,165 @@ class FleetClient:
             timesteps.append(step)
         return timesteps
 
+
+    def synchronized_path_follow(
+            self,
+            plan: list[Dict[str, Tuple[int, int]]],
+            dwell_time: Optional[Dict[str, float]] = None,
+            nav_timeout: float = 30.0,
+            plan_cancel_event: Optional[threading.Event] = None,
+            ) -> List[Results]:
+        """Execute a MAPF plan with per-timestep synchronization.
+
+        All robots present in a timestep must reach their cell before any
+        robot advances to the next timestep.  Robots that appear/disappear
+        between timesteps are added/removed from the sim.
+
+        Args:
+            plan: List of timesteps.  Each timestep is ``{robot_name: (row, col)}``.
+            dwell_time: Optional ``{robot_name: seconds}`` applied after the
+                full plan completes.  Robots dwell in parallel; dwell can be
+                interrupted by ``plan_cancel_event``.
+            nav_timeout: Per-timestep navigation timeout (seconds).
+            plan_cancel_event: External cancellation flag.  When set, the
+                current timestep wait is aborted and the function stops all
+                active robots before returning.
+
+        Returns:
+            ``Results`` per executed timestep.  Dwell outcomes (if any) land
+            in ``result_list[-1].dwelled``.
+        """
+        if plan_cancel_event is None:
+            plan_cancel_event = threading.Event()
+        if dwell_time is None:
+            dwell_time = {}
+
+        result_list: List[Results] = []
+        plan_robots = set(name for timestep in plan for name in timestep)
+        previous_robots = set(self._names) & plan_robots
+
+        for i, timestep in enumerate(plan):
+            if plan_cancel_event.is_set():
+                self._node.get_logger().info(
+                    f"Plan cancelled before timestep {i}"
+                )
+                break
+
+            current_robots = set(timestep.keys())
+
+            # Diff: robots that appeared or disappeared
+            added = current_robots - previous_robots
+            removed = previous_robots - current_robots
+
+            for name in removed:
+                self._node.get_logger().info(
+                    f"Timestep {i}: removing robot '{name}'"
+                )
+                try:
+                    self.remove_robot(name)
+                except (ValueError, RuntimeError) as e:
+                    self._node.get_logger().warn(
+                        f"Failed to remove robot '{name}': {e}"
+                    )
+
+            for name in added:
+                row, col = timestep[name]
+                self._node.get_logger().info(
+                    f"Timestep {i}: adding robot '{name}' at ({row},{col})"
+                )
+                try:
+                    self.add_robot(name, row, col)
+                except (ValueError, RuntimeError) as e:
+                    self._node.get_logger().warn(
+                        f"Failed to add robot '{name}': {e}"
+                    )
+
+            # failed adds wont poison the next robot diff
+            previous_robots = set(self._names) & plan_robots
+
+            # Execute the timestep goals (only for robots present)
+            start = datetime.datetime.now()
+            res = Results(i, start, self._node.get_clock().now())
+            active = {k: v for k, v in timestep.items() if k in self._names}
+
+            for robot_name, (row, col) in active.items():
+                self.send_grid_goal(robot_name, row, col)
+
+            complete: Dict[str, bool] = {}
+            completion_time: Dict[str, timedelta] = {}
+            pos_error: Dict[str, Tuple[float, float]] = {}
+
+            def _wait_one(robot_name: str, row: int, col: int):
+                reached = self._wait_for_goal_or_cancel(
+                    robot_name, plan_cancel_event, nav_timeout
+                )
+                ct = datetime.datetime.now() - start
+                try:
+                    curr_pos = self.get_position(robot_name)
+                    desired_pos = grid_cell_to_world_center(
+                        row, col, self._origin, self._resolution, self._map_height
+                    )
+                    pe = (curr_pos[0] - desired_pos[0], curr_pos[1] - desired_pos[1])
+                except RuntimeError:
+                    pe = (float('inf'), float('inf'))
+                return robot_name, reached, ct, pe
+
+            if active:
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=len(active)
+                ) as pool:
+                    futures = [
+                        pool.submit(_wait_one, name, row, col)
+                        for name, (row, col) in active.items()
+                    ]
+                    for future in concurrent.futures.as_completed(futures):
+                        name, reached, ct, pe = future.result()
+                        complete[name] = reached
+                        completion_time[name] = ct
+                        pos_error[name] = pe
+                        if not reached:
+                            self._node.get_logger().info(
+                                f"Robot {name} failed navigation at timestep {i}"
+                            )
+
+            res.complete = complete
+            res.completion_time = completion_time
+            res.position_error = pos_error
+            result_list.append(res)
+
+            if plan_cancel_event.is_set():
+                for name in list(active.keys()):
+                    self._stop_robot(name)
+                break
+
+        # Dwell phase — robots hold their final cell for their per-robot duration
+        if dwell_time and not plan_cancel_event.is_set():
+            dwellers = {
+                r: d for r, d in dwell_time.items()
+                if r in self._names and d > 0
+            }
+            dwelled: Dict[str, bool] = {}
+
+            def _dwell_one(robot_name: str, duration: float):
+                cancelled = plan_cancel_event.wait(timeout=duration)
+                return robot_name, not cancelled
+
+            if dwellers:
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=len(dwellers)
+                ) as pool:
+                    futures = [
+                        pool.submit(_dwell_one, name, dur)
+                        for name, dur in dwellers.items()
+                    ]
+                    for future in concurrent.futures.as_completed(futures):
+                        name, ok = future.result()
+                        dwelled[name] = ok
+
+                if result_list:
+                    result_list[-1].dwelled = dwelled
+
+        return result_list
 
     def execute_plan(self, plan: list[Dict]) -> List[Results]:
         """Execute a plan, automatically adding/removing robots between timesteps.
@@ -455,7 +614,7 @@ class FleetClient:
             res = Results(i, start, self._node.get_clock().now())
             active = {k: v for k, v in timestep.items() if k in self._names}
             complete = {robot: True for robot in active}
-            completion_time = default_factory=Dict
+            completion_time = {}
             pos_error = {rb: 0.0 for rb in active}
             for robot_name, (row, col) in active.items():
                 self.send_grid_goal(robot_name, row, col)
